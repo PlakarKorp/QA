@@ -100,6 +100,17 @@ live — authenticated, an unknown snapshot id returns 500 — so this looks lik
 real finding rather than an artifact of the rig, but nobody has confirmed what
 the 200 carries. It wants its own look before it becomes an issue.
 
+## The ledger
+
+`bin/ledger` reads the daemon's own log -- the routes it mounts at startup
+against the requests it answered -- so coverage needs no instrumentation and
+counts any client, not just the Go suite. Every run writes `logs/ledger.txt`.
+
+The untouched list is the point. Today it is 38 routes, and it is the work
+queue: cloud inventories (aws, gcp, k8s, ovh, scaleway, vmware), the offline
+enrollment pair, `POST /connectors/{id}/test`, SLA template updates, the package
+endpoints, `GET /agent/token`, `GET /journal/export`, `PUT /license`.
+
 ## Environment constraints, learned the hard way
 
 - Building plakman's `local` image needs BuildKit *and* an SSH agent with access

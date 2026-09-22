@@ -27,6 +27,10 @@ DB_PORT="${DB_PORT:-15432}"
 MINIO_HOST="${MINIO_HOST:-localhost}"
 S3_VERSION="${S3_VERSION:-v1.1.6}"
 MIN_VERSIONS="${MIN_VERSIONS:-1}"
+# What phase 2 runs. Everything, by default: most of plakman's suite is
+# permission and misuse coverage, and all of it is worth running against a real
+# instance rather than in process.
+SUITE="${SUITE:-.}"
 KEEP="${KEEP:-0}"
 
 PLAKMAN_URL="http://localhost:$PLAKMAN_PORT"
@@ -35,6 +39,8 @@ DB_URL="postgres://plakman:plakman@localhost:$DB_PORT/plakman"
 
 COMPOSE=(docker compose -f "$PLAKMAN_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.qa.yaml")
 export QA_MOCK_PARENT="$QA_ROOT/bin/mock-parent-static"
+export QA_MOCK_ORKESTRATOR="$QA_ROOT/bin/mock-orkestrator-static"
+ORKESTRATOR_URL="http://localhost:${ORKESTRATOR_PORT:-18083}"
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -58,6 +64,12 @@ build() {
   # the rig's biggest compromise -- it tests a plakman, not the shipped one.
   ( cd "$PLAKMAN_SRC" && go build -o "$QA_ROOT/bin/" ./cmd/plakman ./cmd/plaklet ./cmd/cached ) \
     || die "plakman failed to build (is GOPRIVATE set, and an SSH key loaded?)"
+  # The daemon proxies release-feed, update and network calls to an orkestrator
+  # and answers 500 without one, which is a failure about the rig rather than
+  # about plakman. plakman ships the mock; we just run it.
+  ( cd "$PLAKMAN_SRC" && CGO_ENABLED=0 go build -ldflags='-s -w' \
+      -o "$QA_ROOT/bin/mock-orkestrator-static" ./cmd/mock-orkestrator ) \
+    || die "mock orkestrator failed to build"
 }
 
 # --- infrastructure --------------------------------------------------------
@@ -65,11 +77,12 @@ build() {
 infra_up() {
   log "infrastructure"
   docker network inspect plakario_network >/dev/null 2>&1 || docker network create plakario_network >/dev/null
-  "${COMPOSE[@]}" up -d db minio backend >/dev/null 2>&1 || die "compose up failed"
+  "${COMPOSE[@]}" up -d db minio backend orkestrator >/dev/null 2>&1 || die "compose up failed"
   wait_for "http://localhost:9000/minio/health/live" "minio"
   wait_for "$PARENT_URL/api/v1/pki/keys/mock-parent" "mock parent"
+  wait_for "$ORKESTRATOR_URL/feed" "mock orkestrator"
   ( cd "$PLAKMAN_SRC" && sh scripts/create-buckets.sh >/dev/null 2>&1 ) || die "bucket creation failed"
-  note "db :$DB_PORT   minio :9000   parent :$PARENT_PORT"
+  note "db :$DB_PORT   minio :9000   parent :$PARENT_PORT   orkestrator :${ORKESTRATOR_PORT:-18083}"
 }
 
 # reset wipes both halves of the instance identity: plakman's database and
@@ -131,7 +144,14 @@ plakman_start() { # plakman_start <phase>
     eval "$(ssh-agent -s)" >/dev/null
     export QA_OWNS_AGENT="${SSH_AGENT_PID:-}"
   fi
-  nohup "$QA_ROOT/bin/plakman" -config "$STATE/plakman.yaml" -foreground \
+  nohup env \
+    PLAKMAN_RELEASE_FEED_URL="$ORKESTRATOR_URL/feed" \
+    PLAKMAN_RELEASE_FEED_CACHE_TTL=0 \
+    PLAKMAN_UPDATE_URL="$ORKESTRATOR_URL/update" \
+    PLAKMAN_UPDATE_TASK_STATUS_URL="$ORKESTRATOR_URL/task_status" \
+    PLAKMAN_NET_INTERFACES_URL="$ORKESTRATOR_URL/net/interfaces" \
+    PLAKMAN_NET_CONFIGURE_URL="$ORKESTRATOR_URL/net/configure" \
+    "$QA_ROOT/bin/plakman" -config "$STATE/plakman.yaml" -foreground \
     > "$LOGS/plakman.${1:-run}.log" 2>&1 &
   disown
   wait_for "$PLAKMAN_URL/health" "plakman"
@@ -152,7 +172,7 @@ run_suite() { # run_suite <name> <-run regexp> <outfile>
     PLAKMAN_DATABASE="$DB_URL" \
     PLAKMAN_TEST_MINIO_HOST="$MINIO_HOST" \
     PLAKMAN_REQUIRE_INFRA=1 \
-    go test -tags devel -count=1 -v -timeout 35m ./tests/ -run "$2" ) > "$3" 2>&1
+    go test -tags devel -count=1 -v -timeout 35m ./tests/ -run "$2" ${4:+-skip "$4"} ) > "$3" 2>&1
   return $?
 }
 
@@ -182,9 +202,7 @@ main() {
     | sed 's/^/    /' || die "seeding failed"
 
   log "phase 2: scenarios"
-  run_suite scenarios \
-    'TestAccountMe|TestBadges$|TestLogin$|TestCreateOrganization$|TestE2E' \
-    "$LOGS/phase2.out"
+  run_suite scenarios "$SUITE" "$LOGS/phase2.out" 'TestBootstrap$' 
   p2=$?
   grep -E '^--- (PASS|FAIL)' "$LOGS/phase2.out" | sed 's/^/    /' || true
 
@@ -194,6 +212,13 @@ main() {
   fail=$(cat "$LOGS"/phase*.out | grep -cE '^--- FAIL' || true)
   printf '    passed   %s\n    failed   %s\n' "$pass" "$fail"
   printf '    logs     %s\n' "$LOGS"
+
+  # Coverage, from the daemon's own log: what it mounted at startup versus what
+  # it answered. A green run says what we tested; only the untouched list says
+  # what we are still guessing at.
+  printf '\n'
+  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.phase*.log | sed 's/^/    /'
+  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.phase*.log > "$LOGS/ledger.txt" 2>&1
   if [ "$fail" -gt 0 ]; then
     printf '\n    failing:\n'
     cat "$LOGS"/phase*.out | grep -E '^\s*--- FAIL' | sed 's/^/      /'

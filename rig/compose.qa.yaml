@@ -25,3 +25,21 @@ services:
   # still serves it.
   minio:
     image: quay.io/minio/minio:latest
+
+  # The orkestrator the daemon proxies release-feed, update and network calls
+  # to. compose builds it from plakman's cmd/mock-orkestrator; we bind-mount a
+  # static build instead so the rig needs no image build. It hardcodes :8080
+  # internally, hence the published port.
+  orkestrator:
+    image: debian:trixie-slim
+    pull_policy: missing
+    # Drop the builder dependency: compose builds plk-orkestrator:local with
+    # `RUN --mount=type=ssh`, which needs BuildKit and a key. We bind-mount a
+    # static build of the same cmd instead.
+    depends_on: !reset []
+    build: !reset null
+    command: ["/usr/local/bin/mock-orkestrator"]
+    volumes:
+      - ${QA_MOCK_ORKESTRATOR:?set QA_MOCK_ORKESTRATOR to the mock-orkestrator binary}:/usr/local/bin/mock-orkestrator:ro
+    ports:
+      - "18083:8080"
