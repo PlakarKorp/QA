@@ -10,18 +10,18 @@ trusts yet gets routed around, and we have no track record yet.
 The plan this follows is `engineering/plans/2026-09-22-plakman-qa-release-gate.md`
 in source-of-truth.
 
-## What is here today
-
-Step 1 of the plan: enrollment, which was the assumption everything else rested
-on. It works.
+## What is here
 
     cmd/mock-parent   stands in for core-api during a QA run
     cmd/enroll        drives a fresh instance through enrollment
-    cmd/seed          the credential-free half of `make seed`
+    cmd/seed          brings an enrolled instance to what the scenarios assume
+    cmd/catalog       prints the catalog as the instance sees it
     rig/compose.qa.yaml  overrides plakman's compose for a QA stack
 
-Nothing here writes scenarios yet. That is step 3, and it is blocked — see
-below.
+No scenarios of our own yet. plakman's own `tests/` already has the data-path
+e2e layer (backup/prune/restore against MinIO over a real daemon) and
+`PLAKMAN_DAEMON` already points it at a deployment it did not start, so the
+first thing worth doing is running *those* rather than writing new ones.
 
 ## The mock parent
 
@@ -42,42 +42,51 @@ mean QA could never test the binary we ship.
 Needs the plakman checkout beside this one, and `GOPRIVATE=github.com/PlakarKorp/*`.
 
     go build -o bin/ ./cmd/...
-    make -C ../plakman ...   # bring up db, minio, and the QA override
 
     ./bin/mock-parent -listen :8081
-    ./bin/enroll  -parent http://localhost:8081 -plakman http://localhost:8080
-    ./bin/seed    -parent http://localhost:8081 -plakman http://localhost:8080
+    ./bin/enroll -parent http://localhost:8081 -plakman http://localhost:8080
+    ./bin/seed   -parent http://localhost:8081 -plakman http://localhost:8080 \
+                 -s3-version v1.1.6 -retention-min-versions 1
 
 `enroll` reimplements `cmd/bootstrap`'s Enroll rather than calling it, because
 that command hardcodes localhost:8080 and localhost:8081 and a rig has to point
 at whatever ports it actually bound.
 
-## What blocks the data path
+Then plakman's own suite, against that instance:
 
-Backup/restore needs the s3 integration, and installing it fails:
+    PLAKMAN_DAEMON=http://localhost:8080 \
+    PLAKMAN_PARENT=http://localhost:8081 \
+    PLAKMAN_TEST_MINIO_HOST=localhost \
+    PLAKMAN_REQUIRE_INFRA=1 \
+      go test -tags devel ./tests/ -run TestE2E
 
-    package signature verification failed: s3_v1.1.6_linux_amd64.ptar:
-    package is not signed
+## What seeding has to state
 
-Probing the feed directly, with the path layout confirmed by an older package
-that does resolve:
+A scenario inherits deployment policy, and two pieces of it decide whether the
+scenario can pass at all. Neither is stated by the tests, so the seed states
+them:
 
-    community/v1.0.0/s3/s3_v1.0.8_linux_amd64.ptar        206
-    community/v1.0.0/s3/s3_v1.0.8_linux_amd64.ptar.sig    404
-    enterprise/v1.0.0/s3/s3_v1.1.6_linux_amd64.ptar       404
+- **The retention floor.** `DefaultMinVersions` is 3 restore points per source,
+  so a prune cannot take a source down to one and a scenario that expects it to
+  fails with more snapshots than it wanted. `-retention-min-versions` sets it.
+  It is organization-scoped, not deployment-scoped — only `packages` is the
+  latter.
+- **The integration version.** The catalog offers the newest version for the
+  instance's edition, so "install s3" means something different from one week to
+  the next. `-s3-version` pins it, which is what makes a run reproducible.
 
-The index advertises `s3 enterprise v1.1.6`; no package exists where the
-executor looks for it. The alternate package repository is a database setting,
-not something the parent or the license hands over, so this is not the mock's
-doing — a real core-api enrollment lands on the same public feed.
+## Where the data path stands
 
-Unresolved: whether enterprise deployments are *expected* to configure their own
-repository, which would make this working as designed rather than broken. Either
-way the diagnostic is wrong: a missing package should not report as unsigned.
+It works. Against a real instance the e2e prune scenario installs s3 from the
+**public feed** (no mirror needed — packages are published and signed), runs four
+backups from MinIO source buckets into a MinIO store, and prunes them back to
+two.
 
-**So the rig needs its own signed package mirror.** Until it has one, a QA run
-depends on whatever is published on the day, which is not a property a release
-gate can have.
+It still fails at the last assertion: browsing a snapshot removed by prune
+returns 200 where the test wants 404 (the #794 regression check). The route is
+live — authenticated, an unknown snapshot id returns 500 — so this looks like a
+real finding rather than an artifact of the rig, but nobody has confirmed what
+the 200 carries. It wants its own look before it becomes an issue.
 
 ## Environment constraints, learned the hard way
 
@@ -88,13 +97,17 @@ gate can have.
   external. The rig should bind ephemeral ports and create the network itself.
 - `cached` binds a unix socket under the state directory, so a long state path
   fails with `bind: invalid argument`. Keep it short.
-- The executor wants `SSH_AUTH_SOCK`; compose supplies one at
-  `/var/lib/plakman/ssh-agent.sock`.
+- The executor wants `SSH_AUTH_SOCK` and refuses to initialise without one.
 - MinIO no longer serves its Docker Hub image; `rig/compose.qa.yaml` points at
   quay.io.
 - The credential-free seed is smaller than expected: `.seed-admin.yaml`'s minio
   connectors already hardcode `minioadmin`. Only SFTP and the AWS/Scaleway
   entries need gopass.
+- The distribution tree is `<edition>/<plugin api>/<name>/<file>`, where the api
+  segment is `pkg.PLUGIN_API_VERSION` (v1.1.0) — *not* the version in the index
+  filename (`integrations-v1.0.0.json`). Signatures are `.ptar.sum.sig`. Both
+  are easy to guess wrong, and guessing wrong looks exactly like a missing or
+  unsigned package.
 
 ## On the plakman dependency
 
