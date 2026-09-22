@@ -95,10 +95,16 @@ backups from MinIO source buckets into a MinIO store, and prunes them back to
 two.
 
 It still fails at the last assertion: browsing a snapshot removed by prune
-returns 200 where the test wants 404 (the #794 regression check). The route is
-live — authenticated, an unknown snapshot id returns 500 — so this looks like a
-real finding rather than an artifact of the rig, but nobody has confirmed what
-the 200 carries. It wants its own look before it becomes an issue.
+returns 200 where the test wants 404. Chased down and filed as
+PlakarKorp/plakman#1544. The snapshot is genuinely delisted -- the count comes
+from `repo.ListSnapshots()` against the kloset repository, and it drops from 4
+to 2 -- but the VFS still resolves it and returns a populated tree, while an id
+that never existed correctly 404s on the same route. So it reads as a lookup
+that does not consult whatever prune updated, rather than a hole in the route's
+error handling.
+
+An earlier note here said an unknown snapshot answers 500. That was a bogus
+*store* id, which is a different path; with a valid store it is 404.
 
 ## Ordering, and why it matters
 
