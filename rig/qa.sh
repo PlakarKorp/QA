@@ -185,31 +185,44 @@ main() {
 
   # Phase 1: enrollment, on an instance that has never enrolled.
   reset
-  plakman_start phase1
-  log "phase 1: bootstrap (pristine instance)"
-  run_suite bootstrap 'TestBootstrap$' "$LOGS/phase1.out"
+  plakman_start bootstrap
+  log "bootstrap (pristine instance)"
+  run_suite bootstrap 'TestBootstrap$' "$LOGS/bootstrap.out"
   p1=$?
-  grep -E '^\s+--- (PASS|FAIL)' "$LOGS/phase1.out" | sed 's/^/    /' || true
+  grep -E '^\s+--- (PASS|FAIL)' "$LOGS/bootstrap.out" | sed 's/^/    /' || true
 
-  # Phase 2: everything that needs an enrolled, seeded instance.
+  # Everything else shares one enrolled, seeded instance.
   reset
-  plakman_start phase2
-  log "phase 2: enroll and seed"
+  plakman_start main
+  log "enroll and seed"
   "$QA_ROOT/bin/enroll" -parent "$PARENT_URL" -plakman "$PLAKMAN_URL" \
     | sed 's/^/    /' || die "enrollment failed"
   "$QA_ROOT/bin/seed" -parent "$PARENT_URL" -plakman "$PLAKMAN_URL" \
     -s3-version "$S3_VERSION" -retention-min-versions "$MIN_VERSIONS" \
     | sed 's/^/    /' || die "seeding failed"
 
-  log "phase 2: scenarios"
-  run_suite scenarios "$SUITE" "$LOGS/phase2.out" 'TestBootstrap$' 
+  # Ours first, deliberately. plakman's suite mutates deployment-scoped
+  # settings and does not put them back -- organization_settings_test and
+  # settings_rehome_test both leave the packages repository pointing at
+  # mirror.example -- which is invisible in process, where every run gets a
+  # fresh database, and poisons anything sharing a long-lived instance. Running
+  # ours afterwards meant reading a 502 from a feed a previous test had broken.
+  log "coverage scenarios"
+  ( cd "$QA_ROOT" && \
+    PLAKMAN_URL="$PLAKMAN_URL" PLAKMAN_PARENT="$PARENT_URL" \
+    go test ./scenarios/... -count=1 -v ) > "$LOGS/scenarios.out" 2>&1
   p2=$?
-  grep -E '^--- (PASS|FAIL)' "$LOGS/phase2.out" | sed 's/^/    /' || true
+  grep -E '^--- (PASS|FAIL|SKIP)' "$LOGS/scenarios.out" | sed 's/^/    /' || true
+
+  log "plakman suite"
+  run_suite suite "$SUITE" "$LOGS/suite.out" 'TestBootstrap$'
+  p3=$?
+  grep -E '^--- (PASS|FAIL)' "$LOGS/suite.out" | sed 's/^/    /' || true
 
   # --- report ---
   log "result"
-  pass=$(cat "$LOGS"/phase*.out | grep -cE '^--- PASS' || true)
-  fail=$(cat "$LOGS"/phase*.out | grep -cE '^--- FAIL' || true)
+  pass=$(cat "$LOGS"/*.out | grep -cE '^--- PASS' || true)
+  fail=$(cat "$LOGS"/*.out | grep -cE '^--- FAIL' || true)
   printf '    passed   %s\n    failed   %s\n' "$pass" "$fail"
   printf '    logs     %s\n' "$LOGS"
 
@@ -217,11 +230,11 @@ main() {
   # it answered. A green run says what we tested; only the untouched list says
   # what we are still guessing at.
   printf '\n'
-  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.phase*.log | sed 's/^/    /'
-  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.phase*.log > "$LOGS/ledger.txt" 2>&1
+  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.*.log | sed 's/^/    /'
+  "$QA_ROOT/bin/ledger" "$LOGS"/plakman.*.log > "$LOGS/ledger.txt" 2>&1
   if [ "$fail" -gt 0 ]; then
     printf '\n    failing:\n'
-    cat "$LOGS"/phase*.out | grep -E '^\s*--- FAIL' | sed 's/^/      /'
+    cat "$LOGS"/*.out | grep -E '^\s*--- FAIL' | sed 's/^/      /'
   fi
 
   if [ "$KEEP" = "1" ]; then
@@ -233,7 +246,7 @@ main() {
     [ -n "${QA_OWNS_AGENT:-}" ] && kill "$QA_OWNS_AGENT" 2>/dev/null
   fi
 
-  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ]
+  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ]
 }
 
 main "$@"

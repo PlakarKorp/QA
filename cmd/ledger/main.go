@@ -36,6 +36,22 @@ var (
 // it at startup and with it on every request, so one side has to be normalised.
 const apiPrefix = "/api/v1"
 
+// specificity scores how literal a template is: a path can match several, and
+// the server routes it to the most specific, so the ledger has to as well.
+// /inventories/coverage matches both itself and /inventories/{inventory_id},
+// and crediting the wildcard leaves the literal route looking untouched.
+func specificity(tmpl string) int {
+	n := 0
+	for _, seg := range strings.Split(strings.Trim(tmpl, "/"), "/") {
+		if !strings.HasPrefix(seg, "{") {
+			n += 2 // a literal segment beats a wildcard
+		} else if !strings.HasSuffix(seg, "...}") {
+			n++ // a single-segment wildcard beats a trailing one
+		}
+	}
+	return n
+}
+
 // matches reports whether a concrete path is an instance of a route template.
 // Templates use {name} for one segment and {name...} for the rest, which is
 // net/http's own pattern syntax.
@@ -103,18 +119,24 @@ func main() {
 	unmatched := map[string]int{}
 	for _, r := range requests {
 		trimmed := strings.TrimPrefix(r.path, apiPrefix)
-		var found bool
+		best, bestScore, found := route{}, -1, false
 		for rt := range universe {
 			if rt.method != r.method {
 				continue
 			}
-			if matches(rt.tmpl, trimmed) || matches(rt.tmpl, r.path) {
-				hits[rt]++
-				found = true
-				break
+			if !matches(rt.tmpl, trimmed) && !matches(rt.tmpl, r.path) {
+				continue
+			}
+			// Ties are broken on the template string so a run is reproducible:
+			// ranging a map is not ordered.
+			if sc := specificity(rt.tmpl); sc > bestScore ||
+				(sc == bestScore && rt.tmpl < best.tmpl) {
+				best, bestScore, found = rt, sc, true
 			}
 		}
-		if !found {
+		if found {
+			hits[best]++
+		} else {
 			unmatched[r.method+" "+r.path]++
 		}
 	}

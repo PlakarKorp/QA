@@ -100,16 +100,34 @@ live — authenticated, an unknown snapshot id returns 500 — so this looks lik
 real finding rather than an artifact of the rig, but nobody has confirmed what
 the 200 carries. It wants its own look before it becomes an issue.
 
+## Ordering, and why it matters
+
+Our scenarios run **before** plakman's suite, on purpose. Two of its tests --
+`organization_settings_test` and `settings_rehome_test` -- point the
+deployment-scoped packages repository at `mirror.example` and never put it back.
+In process that is invisible: every run gets a fresh database. On an instance
+anything else shares, it poisons the package feed, and the first thing we saw
+was a 502 from an endpoint that was working fine.
+
+Worth knowing beyond this rig: a test that writes deployment-scoped state and
+does not restore it is fine in process and wrong everywhere else.
+
 ## The ledger
 
 `bin/ledger` reads the daemon's own log -- the routes it mounts at startup
 against the requests it answered -- so coverage needs no instrumentation and
 counts any client, not just the Go suite. Every run writes `logs/ledger.txt`.
 
-The untouched list is the point. Today it is 38 routes, and it is the work
-queue: cloud inventories (aws, gcp, k8s, ovh, scaleway, vmware), the offline
-enrollment pair, `POST /connectors/{id}/test`, SLA template updates, the package
-endpoints, `GET /agent/token`, `GET /journal/export`, `PUT /license`.
+The untouched list is the point, and it is the work queue. It started at 38 and
+is down to 6: `OPTIONS /`, `GET /{$}`, `GET /agent/token`, the resource update
+and endpoint reads, and `GET /mnt/{mount_id}/download/{path...}`. The rest fell
+to `scenarios/`.
+
+One caution from building it: a concrete path can match several templates, and
+the ledger has to pick the one the server would. Crediting
+`/inventories/coverage` to `/inventories/{inventory_id}` left the literal route
+looking untouched and undercounted the whole report -- it read 86% when the
+truth was 98%. It now prefers the most specific match.
 
 ## Environment constraints, learned the hard way
 
