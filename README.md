@@ -41,24 +41,36 @@ mean QA could never test the binary we ship.
 
 Needs the plakman checkout beside this one, and `GOPRIVATE=github.com/PlakarKorp/*`.
 
-    go build -o bin/ ./cmd/...
+    make qa            # one run, tears down after
+    make qa-keep       # same, leaves the instance up to poke at
+
+`PLAKMAN_SRC` points at the plakman tree (default `../plakman`); `S3_VERSION`,
+`MIN_VERSIONS` and `RUN_DIR` override the rest. Logs land in `$RUN_DIR/logs`.
+
+### The two phases
+
+The run resets the instance in the middle, which is not tidiness:
+
+1. **bootstrap**, against a plakman that has never enrolled *and* a parent that
+   has never issued anything. These are the tests *of* enrollment -- one of them
+   asserts the deployment has no organizations at all.
+2. **everything else**, against an enrolled and seeded instance.
+
+Wiping only one half leaves a split brain: the parent still holding
+organizations plakman has forgotten, which fails a bootstrap assertion for
+reasons that have nothing to do with plakman. `reset` does both.
+
+### Pieces, if you want them by hand
 
     ./bin/mock-parent -listen :8081
     ./bin/enroll -parent http://localhost:8081 -plakman http://localhost:8080
     ./bin/seed   -parent http://localhost:8081 -plakman http://localhost:8080 \
                  -s3-version v1.1.6 -retention-min-versions 1
+    ./bin/catalog -name s3
 
 `enroll` reimplements `cmd/bootstrap`'s Enroll rather than calling it, because
 that command hardcodes localhost:8080 and localhost:8081 and a rig has to point
 at whatever ports it actually bound.
-
-Then plakman's own suite, against that instance:
-
-    PLAKMAN_DAEMON=http://localhost:8080 \
-    PLAKMAN_PARENT=http://localhost:8081 \
-    PLAKMAN_TEST_MINIO_HOST=localhost \
-    PLAKMAN_REQUIRE_INFRA=1 \
-      go test -tags devel ./tests/ -run TestE2E
 
 ## What seeding has to state
 
