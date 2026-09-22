@@ -1,0 +1,27 @@
+# QA override: replaces core-api with the mock parent and moves published host
+# ports out of the way. Nothing here changes plakman itself -- the parent is
+# reached via plakman.yaml's parentUrl (http://backend:8081), so standing a
+# service up under the name `backend` is the whole seam.
+services:
+  backend:
+    image: debian:trixie-slim
+    command: ["/usr/local/bin/mock-parent", "-listen", ":8081"]
+    volumes:
+      - ${QA_MOCK_PARENT:?set QA_MOCK_PARENT to the mock-parent binary}:/usr/local/bin/mock-parent:ro
+    networks:
+      - default
+      - plakario-network
+    ports:
+      - "18081:8081"
+
+  plakman:
+    depends_on:
+      - db
+      - backend
+    ports: !override
+      - "18080:8080"
+
+  # MinIO removed their Docker Hub image; the rig has to name a registry that
+  # still serves it.
+  minio:
+    image: quay.io/minio/minio:latest
