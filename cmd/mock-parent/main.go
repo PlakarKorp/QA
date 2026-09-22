@@ -28,8 +28,9 @@ type parent struct {
 	jwt  credentials.JWT
 	keys *pki.PkiMemory
 
-	orgs map[uuid.UUID]contract.OrganizationResponse
-	user uuid.UUID
+	orgs   map[uuid.UUID]contract.OrganizationResponse
+	user   uuid.UUID
+	access uuid.UUID
 }
 
 func newParent() (*parent, error) {
@@ -42,10 +43,11 @@ func newParent() (*parent, error) {
 		return nil, err
 	}
 	return &parent{
-		jwt:  credentials.JWT{Pki: keys},
-		keys: keys,
-		orgs: make(map[uuid.UUID]contract.OrganizationResponse),
-		user: uuid.New(),
+		jwt:    credentials.JWT{Pki: keys},
+		keys:   keys,
+		orgs:   make(map[uuid.UUID]contract.OrganizationResponse),
+		user:   uuid.New(),
+		access: uuid.New(),
 	}, nil
 }
 
@@ -72,7 +74,7 @@ func (p *parent) badge(org uuid.UUID) (string, error) {
 		Version:      1,
 		User:         credentials.VersionizedUUID{Id: p.user},
 		Organization: credentials.VersionizedUUID{Id: org},
-		Access:       credentials.VersionizedUUID{Id: uuid.New()},
+		Access:       credentials.VersionizedUUID{Id: p.access},
 	}
 	signed, _, err := p.jwt.SignedString(&b)
 	return signed, err
@@ -180,9 +182,6 @@ func main() {
 			Type:      req.Type,
 			CreatedAt: now,
 			UpdatedAt: now,
-		}
-		if org.Info == nil {
-			org.Info = map[string]string{}
 		}
 		p.orgs[org.Id] = org
 		log.Printf("created organization %s (%s, %s)", org.Name, org.Id, org.Type)
