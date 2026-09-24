@@ -4,7 +4,7 @@ include ../mk/common.mk
 # and drives plakman's own test suite, so it needs the tree, not just a binary.
 PLAKMAN_SRC ?= $(SRC_ROOT)/plakman
 
-.PHONY: all build qa qa-keep instance scenarios clean
+.PHONY: all build qa qa-keep instance scenarios bench clean
 
 all: build
 
@@ -27,6 +27,9 @@ instance:
 # Our own scenarios, against a standing instance (see `make instance`).
 scenarios:
 	$(GO) test ./scenarios/... -count=1 -v
+
+bench:
+	@echo 'plakman: no benchmarks yet'
 
 clean:
 	rm -rf bin/
