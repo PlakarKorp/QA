@@ -14,7 +14,6 @@ import (
 	"github.com/PlakarKorp/plakman/api/v1/contract"
 	"github.com/PlakarKorp/plakman/client"
 	"github.com/PlakarKorp/plakman/credentials"
-	"github.com/PlakarKorp/plakman/model/organization"
 	"github.com/PlakarKorp/plakman/pki"
 	"github.com/google/uuid"
 )
@@ -69,20 +68,41 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
+	// Sign in the way the UI does: plakman relays the login to the parent, and
+	// the poll releases the token only with the completion code, which the mock
+	// serves in place of the sign-in page.
 	var loginRes contract.LoginResponse
-	if err := parent.Client().Endpoint("/api/v1/auth/login/password").Post(struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}{"test@plakar.io", "foobar"}, &loginRes); err != nil {
-		fail("parent login", err)
+	if err := plakman.Client().Endpoint("/api/v1/bootstrap/login").
+		Post(&contract.BootstrapLoginRequest{Email: "test@plakar.io"}, &loginRes); err != nil {
+		fail("POST /bootstrap/login", err)
 	}
-	ok("parent login")
+	var code struct {
+		CompletionCode string `json:"completion_code"`
+	}
+	if err := parent.Client().Endpoint("/qa/completion-code/" + loginRes.PollId).Get(&code); err != nil {
+		fail("read completion code", err)
+	}
+	// Not contract.BootstrapLoginPollRequest: the plakman this module pins
+	// predates the completion code.
+	poll := struct {
+		PollId         string `json:"poll_id"`
+		CompletionCode string `json:"completion_code"`
+	}{loginRes.PollId, code.CompletionCode}
+	var tokenRes contract.TokenResponse
+	if err := plakman.Client().Endpoint("/api/v1/bootstrap/login/poll").Post(&poll, &tokenRes); err != nil {
+		fail("POST /bootstrap/login/poll", err)
+	}
+	var badge credentials.Badge
+	if err := parentJWT.ParseSignedString(tokenRes.Token, &badge); err != nil {
+		fail("verify bootstrap token", err)
+	}
+	ok("bootstrap login with completion code")
 
-	pc := parent.Client(client.WithToken(loginRes.Token))
+	bc := plakman.Client(client.WithBootstrapToken(tokenRes.Token))
 
 	var orgs []contract.OrganizationResponse
-	if err := pc.Endpoint("/api/v1/account/organizations").Get(&orgs); err != nil {
-		fail("list parent organizations", err)
+	if err := bc.Endpoint("/api/v1/bootstrap/organizations").Get(&orgs); err != nil {
+		fail("GET /bootstrap/organizations", err)
 	}
 	var orgID uuid.UUID
 	for _, o := range orgs {
@@ -93,35 +113,20 @@ func main() {
 	}
 	if orgID == uuid.Nil {
 		var created contract.OrganizationResponse
-		if err := pc.Endpoint("/api/v1/account/organizations").Post(contract.OrganizationCreateRequest{
-			Type: organization.OrganizationTypeEnterprise,
-			Name: *orgName,
-			Info: map[string]string{},
-		}, &created); err != nil {
-			fail("create parent organization", err)
+		if err := bc.Endpoint("/api/v1/bootstrap/organizations").Post(
+			&contract.BootstrapOrganizationCreateRequest{Name: *orgName, Info: map[string]string{}}, &created); err != nil {
+			fail("POST /bootstrap/organizations", err)
 		}
 		orgID = created.Id
 	}
 	ok("parent organization", orgID)
 
-	var badgeRes contract.TokenResponse
-	if err := pc.Endpoint("/api/v1/auth/badge").Post(
-		contract.BadgeRequest{OrganizationId: orgID, Role: "owner"}, &badgeRes); err != nil {
-		fail("request badge", err)
-	}
-	var badge credentials.Badge
-	if err := parentJWT.ParseSignedString(badgeRes.Token, &badge); err != nil {
-		fail("verify badge", err)
-	}
-	ok("badge issued and verified", badge.Organization.Id)
-
-	// The badge is the bootstrap token: plakman re-presents it to the parent,
-	// pulls a licensing challenge, signs it, and mints the root org + admin.
+	// plakman re-presents the bootstrap token to the parent, pulls a licensing
+	// challenge, signs it, and mints the root org + admin.
 	var enrolled contract.TokenResponse
-	err := plakman.Client(client.WithBootstrapToken(badgeRes.Token)).
-		Endpoint("/api/v1/bootstrap/enroll").
+	err := bc.Endpoint("/api/v1/bootstrap/enroll").
 		Post(&contract.BootstrapEnrollRequest{
-			OrganizationId: badge.Organization.Id,
+			OrganizationId: orgID,
 			Name:           "Admin",
 			Email:          *adminEmail,
 			Password:       *adminPass,
