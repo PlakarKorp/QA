@@ -29,6 +29,7 @@ type parent struct {
 	keys *pki.PkiMemory
 
 	orgs   map[uuid.UUID]contract.OrganizationResponse
+	polls  map[string]string // poll id -> completion code
 	user   uuid.UUID
 	access uuid.UUID
 }
@@ -46,6 +47,7 @@ func newParent() (*parent, error) {
 		jwt:    credentials.JWT{Pki: keys},
 		keys:   keys,
 		orgs:   make(map[uuid.UUID]contract.OrganizationResponse),
+		polls:  make(map[string]string),
 		user:   uuid.New(),
 		access: uuid.New(),
 	}, nil
@@ -129,18 +131,53 @@ func main() {
 
 	// Email + poll: the UI-driven bootstrap login. Resolves immediately here,
 	// because there is no mailbox to click through.
+	//
+	// core-api gates the poll on a completion code, shown to whoever completed
+	// the sign-in, and plakman refuses a parent that does not. A wrong code is
+	// refused; a missing one is not, because plakman's own suite polls without.
 	mux.HandleFunc("POST /api/v1/auth/login/email", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, http.StatusOK, contract.LoginResponse{PollId: uuid.NewString()})
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		id := uuid.NewString()
+		p.polls[id] = uuid.NewString()[:8]
+		reply(w, http.StatusOK, struct {
+			PollId         string `json:"poll_id"`
+			CompletionCode bool   `json:"completion_code"`
+		}{PollId: id, CompletionCode: true})
 	})
 	mux.HandleFunc("POST /api/v1/auth/poll/{id}", func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		code, found := p.polls[r.PathValue("id")]
+		if !found {
+			reply(w, http.StatusNotFound, nil)
+			return
+		}
+		if got := r.Header.Get("X-Completion-Code"); got != "" && got != code {
+			reply(w, http.StatusUnauthorized, struct {
+				Code string `json:"code"`
+			}{"completion_code_required"})
+			return
+		}
 		token, err := p.badge(p.anyOrg())
 		if err != nil {
 			reply(w, http.StatusInternalServerError, nil)
 			return
 		}
 		reply(w, http.StatusOK, contract.TokenResponse{Token: token})
+	})
+	// Not core-api: what the sign-in page would have shown, for the rig to read.
+	mux.HandleFunc("GET /qa/completion-code/{id}", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		code, found := p.polls[r.PathValue("id")]
+		if !found {
+			reply(w, http.StatusNotFound, nil)
+			return
+		}
+		reply(w, http.StatusOK, struct {
+			CompletionCode string `json:"completion_code"`
+		}{code})
 	})
 
 	mux.HandleFunc("GET /api/v1/account/me", func(w http.ResponseWriter, r *http.Request) {
