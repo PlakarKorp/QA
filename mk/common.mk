@@ -3,7 +3,7 @@
 GO ?= go
 
 # The project checkouts are expected beside QA, e.g. ~/src/QA and ~/src/plakman.
-QA_ROOT  := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
-SRC_ROOT ?= $(abspath $(QA_ROOT)/..)
+QA_TOP   := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))..)
+SRC_ROOT ?= $(abspath $(QA_TOP)/..)
 
 .PHONY: qa bench

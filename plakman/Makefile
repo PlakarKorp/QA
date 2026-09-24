@@ -1,8 +1,8 @@
-GO ?= go
+include ../mk/common.mk
 
 # Where the plakman checkout is. The rig builds and runs plakman from source,
 # and drives plakman's own test suite, so it needs the tree, not just a binary.
-PLAKMAN_SRC ?= ../plakman
+PLAKMAN_SRC ?= $(SRC_ROOT)/plakman
 
 .PHONY: all build qa qa-keep instance scenarios clean
 

@@ -39,12 +39,12 @@ mean QA could never test the binary we ship.
 
 ## Running it
 
-Needs the plakman checkout beside this one, and `GOPRIVATE=github.com/PlakarKorp/*`.
+Needs the plakman checkout beside QA, and `GOPRIVATE=github.com/PlakarKorp/*`.
 
     make qa            # one run, tears down after
     make qa-keep       # same, leaves the instance up to poke at
 
-`PLAKMAN_SRC` points at the plakman tree (default `../plakman`); `S3_VERSION`,
+`PLAKMAN_SRC` points at the plakman tree (default `../../plakman`); `S3_VERSION`,
 `MIN_VERSIONS` and `RUN_DIR` override the rest. Logs land in `$RUN_DIR/logs`.
 
 ### The two phases

@@ -11,7 +11,7 @@
 set -u -o pipefail
 
 QA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLAKMAN_SRC="${PLAKMAN_SRC:-$QA_ROOT/../plakman}"
+PLAKMAN_SRC="${PLAKMAN_SRC:-$QA_ROOT/../../plakman}"
 
 # Short on purpose: cached binds a unix socket under the state directory and
 # the path limit is ~108 bytes, which a deep scratch path blows.
