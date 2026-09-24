@@ -184,6 +184,7 @@ run_suite() { # run_suite <name> <-run regexp> <outfile>
   ( cd "$PLAKMAN_SRC" && \
     PLAKMAN_DAEMON="$PLAKMAN_URL" \
     PLAKMAN_PARENT="$PARENT_URL" \
+    PLAKMAN_MAILPIT="$MAILPIT_URL" \
     PLAKMAN_DATABASE="$DB_URL" \
     PLAKMAN_TEST_MINIO_HOST="$MINIO_HOST" \
     PLAKMAN_REQUIRE_INFRA=1 \
