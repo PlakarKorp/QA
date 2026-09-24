@@ -56,8 +56,12 @@ wait_for() { # wait_for <url> <what>
 build() {
   log "building"
   ( cd "$QA_ROOT" && go build -o bin/ ./cmd/... ) || die "qa tools failed to build"
-  # The mock parent runs in a container off a bind mount, so it has to be static.
-  ( cd "$QA_ROOT" && CGO_ENABLED=0 go build -ldflags='-s -w' -o bin/mock-parent-static ./cmd/mock-parent ) \
+  # The mocks run in containers off a bind mount, so they have to be static and
+  # built for the docker server, which is not the host on macOS.
+  local target
+  target="$(docker version -f '{{.Server.Os}} {{.Server.Arch}}')" || die "docker is not reachable"
+  local static=(env CGO_ENABLED=0 GOOS="${target% *}" GOARCH="${target#* }" go build -ldflags='-s -w')
+  ( cd "$QA_ROOT" && "${static[@]}" -o bin/mock-parent-static ./cmd/mock-parent ) \
     || die "static mock parent failed to build"
   # plakman itself: we run the binary rather than the image, because building
   # the image needs BuildKit and an SSH agent with private-repo access. This is
@@ -67,7 +71,7 @@ build() {
   # The daemon proxies release-feed, update and network calls to an orkestrator
   # and answers 500 without one, which is a failure about the rig rather than
   # about plakman. plakman ships the mock; we just run it.
-  ( cd "$PLAKMAN_SRC" && CGO_ENABLED=0 go build -ldflags='-s -w' \
+  ( cd "$PLAKMAN_SRC" && "${static[@]}" \
       -o "$QA_ROOT/bin/mock-orkestrator-static" ./cmd/mock-orkestrator ) \
     || die "mock orkestrator failed to build"
 }
