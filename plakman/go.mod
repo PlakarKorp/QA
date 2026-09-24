@@ -1,4 +1,4 @@
-module github.com/PlakarKorp/plakman-qa
+module github.com/PlakarKorp/QA/plakman
 
 go 1.27.1
 
