@@ -1,0 +1,31 @@
+# core-api's config.dev.yaml, with the links it mails pointing at the port the
+# rig publishes, and no integrations indexer: the worker does not run and QA
+# does not need a catalog from the parent.
+backend:
+  api:
+    listen: 0.0.0.0:8081
+    devMode: true
+  access:
+    tokenKey: e6c2ea94de374c2f824badec8f3adc6d
+  databases:
+    - name: account
+      url: postgres://plakar:plakar@db/plakar?sslmode=disable
+  services:
+    auth:
+      allowPasswordLogin: true
+      email:
+        smtp:
+          address: mailpit:1025
+          sender: noreply@plakar.io
+        subject: Login request
+        redirectUrl: http://localhost:18081/v1/auth/login/email/callback
+      shortener:
+        baseUrl: http://localhost:18081
+    plakman:
+      stateDirectory: /var/lib/plakario
+
+bootstrap:
+  users:
+    - name: Test User
+      email: test@plakar.io
+      password: foobar

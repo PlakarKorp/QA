@@ -12,6 +12,7 @@ set -u -o pipefail
 
 QA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLAKMAN_SRC="${PLAKMAN_SRC:-$QA_ROOT/../../plakman}"
+CORE_API_SRC="${CORE_API_SRC:-$QA_ROOT/../../core-api}"
 
 # Short on purpose: cached binds a unix socket under the state directory and
 # the path limit is ~108 bytes, which a deep scratch path blows.
@@ -38,7 +39,11 @@ PARENT_URL="http://localhost:$PARENT_PORT"
 DB_URL="postgres://plakman:plakman@localhost:$DB_PORT/plakman"
 
 COMPOSE=(docker compose -f "$PLAKMAN_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.qa.yaml")
-export QA_MOCK_PARENT="$QA_ROOT/bin/mock-parent-static"
+# core-api's compose interpolates SSH_AUTH_SOCK before our override drops the
+# mount that uses it, so it only has to be set.
+PARENT=(env SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/dev/null}" docker compose -p qa-core-api -f "$CORE_API_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.core-api.yaml")
+export QA_CORE_API_CONFIG="$QA_ROOT/rig/core-api.qa.yaml"
+MAILPIT_URL="http://localhost:18025"
 export QA_MOCK_ORKESTRATOR="$QA_ROOT/bin/mock-orkestrator-static"
 ORKESTRATOR_URL="http://localhost:${ORKESTRATOR_PORT:-18083}"
 
@@ -46,8 +51,8 @@ log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[31mqa: %s\033[0m\n' "$*" >&2; exit 1; }
 
-wait_for() { # wait_for <url> <what>
-  for _ in $(seq 1 120); do curl -sf -o /dev/null "$1" && return 0; sleep 1; done
+wait_for() { # wait_for <url> <what> [seconds]
+  for _ in $(seq 1 "${3:-120}"); do curl -sf -o /dev/null "$1" && return 0; sleep 1; done
   die "timed out waiting for $2 at $1"
 }
 
@@ -56,13 +61,11 @@ wait_for() { # wait_for <url> <what>
 build() {
   log "building"
   ( cd "$QA_ROOT" && go build -o bin/ ./cmd/... ) || die "qa tools failed to build"
-  # The mocks run in containers off a bind mount, so they have to be static and
-  # built for the docker server, which is not the host on macOS.
+  # The mock orkestrator runs in a container off a bind mount, so it has to be
+  # static and built for the docker server, which is not the host on macOS.
   local target
   target="$(docker version -f '{{.Server.Os}} {{.Server.Arch}}')" || die "docker is not reachable"
   local static=(env CGO_ENABLED=0 GOOS="${target% *}" GOARCH="${target#* }" go build -ldflags='-s -w')
-  ( cd "$QA_ROOT" && "${static[@]}" -o bin/mock-parent-static ./cmd/mock-parent ) \
-    || die "static mock parent failed to build"
   # plakman itself: we run the binary rather than the image, because building
   # the image needs BuildKit and an SSH agent with private-repo access. This is
   # the rig's biggest compromise -- it tests a plakman, not the shipped one.
@@ -81,9 +84,11 @@ build() {
 infra_up() {
   log "infrastructure"
   docker network inspect plakario_network >/dev/null 2>&1 || docker network create plakario_network >/dev/null
-  "${COMPOSE[@]}" up -d db minio backend orkestrator >/dev/null 2>&1 || die "compose up failed"
+  "${COMPOSE[@]}" up -d --remove-orphans db minio orkestrator >/dev/null 2>&1 || die "compose up failed"
+  "${PARENT[@]}" up -d --build db mailpit api >/dev/null 2>&1 || die "core-api compose up failed"
   wait_for "http://localhost:9000/minio/health/live" "minio"
-  wait_for "$PARENT_URL/api/v1/pki/keys/mock-parent" "mock parent"
+  # Long: the api container compiles core-api on start.
+  wait_for "$PARENT_URL/health/ready" "core-api" 600
   wait_for "$ORKESTRATOR_URL/feed" "mock orkestrator"
   ( cd "$PLAKMAN_SRC" && sh scripts/create-buckets.sh >/dev/null 2>&1 ) || die "bucket creation failed"
   note "db :$DB_PORT   minio :9000   parent :$PARENT_PORT   orkestrator :${ORKESTRATOR_PORT:-18083}"
@@ -100,8 +105,14 @@ reset() {
   docker exec plakman-db-1 psql -U plakman -d postgres -c "DROP DATABASE IF EXISTS plakman;" >/dev/null 2>&1
   docker exec plakman-db-1 psql -U plakman -d postgres -c "CREATE DATABASE plakman OWNER plakman;" >/dev/null 2>&1
   rm -rf "$STATE"; mkdir -p "$STATE/pkgs"
-  "${COMPOSE[@]}" up -d --force-recreate backend >/dev/null 2>&1 || die "could not recreate the parent"
-  wait_for "$PARENT_URL/api/v1/pki/keys/mock-parent" "mock parent"
+  # core-api migrates and seeds its dev user on boot, so a fresh database and a
+  # restart give a parent that has never issued anything.
+  "${PARENT[@]}" stop api >/dev/null 2>&1
+  "${PARENT[@]}" exec -T db psql -U plakar -d postgres -c "DROP DATABASE IF EXISTS plakar WITH (FORCE);" >/dev/null 2>&1
+  "${PARENT[@]}" exec -T db psql -U plakar -d postgres -c "CREATE DATABASE plakar OWNER plakar;" >/dev/null 2>&1
+  curl -sf -X DELETE "$MAILPIT_URL/api/v1/messages" >/dev/null || die "could not empty the mailbox"
+  "${PARENT[@]}" start api >/dev/null 2>&1 || die "could not restart core-api"
+  wait_for "$PARENT_URL/health/ready" "core-api" 600
 }
 
 # --- plakman ---------------------------------------------------------------
@@ -199,7 +210,7 @@ main() {
   reset
   plakman_start main
   log "enroll and seed"
-  "$QA_ROOT/bin/enroll" -parent "$PARENT_URL" -plakman "$PLAKMAN_URL" \
+  "$QA_ROOT/bin/enroll" -plakman "$PLAKMAN_URL" -mailpit "$MAILPIT_URL" \
     | sed 's/^/    /' || die "enrollment failed"
   "$QA_ROOT/bin/seed" -parent "$PARENT_URL" -plakman "$PLAKMAN_URL" \
     -s3-version "$S3_VERSION" -retention-min-versions "$MIN_VERSIONS" \
@@ -246,7 +257,8 @@ main() {
   else
     log "teardown"
     plakman_stop
-    "${COMPOSE[@]}" stop db minio backend >/dev/null 2>&1
+    "${COMPOSE[@]}" stop db minio >/dev/null 2>&1
+    "${PARENT[@]}" stop >/dev/null 2>&1
     [ -n "${QA_OWNS_AGENT:-}" ] && kill "$QA_OWNS_AGENT" 2>/dev/null
   fi
 

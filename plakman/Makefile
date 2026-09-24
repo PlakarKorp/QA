@@ -4,6 +4,10 @@ include ../mk/common.mk
 # and drives plakman's own test suite, so it needs the tree, not just a binary.
 PLAKMAN_SRC ?= $(SRC_ROOT)/plakman
 
+# The parent plakman enrolls against. The rig runs core-api from its own compose.
+CORE_API_SRC ?= $(SRC_ROOT)/core-api
+export PLAKMAN_SRC CORE_API_SRC
+
 .PHONY: all build qa qa-keep instance scenarios bench clean
 
 all: build
@@ -14,15 +18,15 @@ build:
 # One QA run: stand an instance up, drive plakman's suite against it, report.
 # KEEP=1 leaves it running to poke at.
 qa:
-	@PLAKMAN_SRC=$(PLAKMAN_SRC) rig/qa.sh
+	@rig/qa.sh
 
 qa-keep:
-	@KEEP=1 PLAKMAN_SRC=$(PLAKMAN_SRC) rig/qa.sh
+	@KEEP=1 rig/qa.sh
 
 # An enrolled, seeded instance, left standing and running no tests. What you
 # want while writing scenarios against it.
 instance:
-	@KEEP=1 SUITE='^$$' PLAKMAN_SRC=$(PLAKMAN_SRC) rig/qa.sh
+	@KEEP=1 SUITE='^$$' rig/qa.sh
 
 # Our own scenarios, against a standing instance (see `make instance`).
 scenarios:

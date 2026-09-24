@@ -55,14 +55,27 @@ func connect() error {
 	parent := client.NewServer(parentURL)
 	plakman := client.NewServer(plakmanURL)
 
-	var orgs []api.OrganizationResponse
-	if err := parent.Client().Endpoint("/api/v1/account/organizations").Get(&orgs); err != nil {
+	// core-api seeds this user in dev mode.
+	var login api.LoginResponse
+	if err := parent.Client().Endpoint("/api/v1/auth/login/password").Post(struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}{"test@plakar.io", "foobar"}, &login); err != nil {
 		return err
 	}
-	if len(orgs) == 0 {
-		return fmt.Errorf("parent has no organizations; enroll first")
+	var orgs []api.OrganizationResponse
+	if err := parent.Client(client.WithToken(login.Token)).Endpoint("/api/v1/account/organizations").Get(&orgs); err != nil {
+		return err
 	}
-	orgID = orgs[0].Id
+	// The parent's user has organizations of its own besides the one enrolled.
+	for _, o := range orgs {
+		if o.Name == "Root organization" {
+			orgID = o.Id
+		}
+	}
+	if orgID == uuid.Nil {
+		return fmt.Errorf("parent has no root organization; enroll first")
+	}
 
 	flow := client.NewLoginFlow(plakman.Client())
 	if err := flow.Login(api.LoginPasswordRequest{

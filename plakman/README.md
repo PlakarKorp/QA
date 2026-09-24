@@ -12,39 +12,45 @@ in source-of-truth.
 
 ## What is here
 
-    cmd/mock-parent   stands in for core-api during a QA run
     cmd/enroll        drives a fresh instance through enrollment
     cmd/seed          brings an enrolled instance to what the scenarios assume
     cmd/catalog       prints the catalog as the instance sees it
     rig/compose.qa.yaml  overrides plakman's compose for a QA stack
+    rig/compose.core-api.yaml, rig/core-api.qa.yaml
+                         run core-api from its own compose as the parent
 
 No scenarios of our own yet. plakman's own `tests/` already has the data-path
 e2e layer (backup/prune/restore against MinIO over a real daemon) and
 `PLAKMAN_DAEMON` already points it at a deployment it did not start, so the
 first thing worth doing is running *those* rather than writing new ones.
 
-## The mock parent
+## The parent
 
 plakman asks its parent for four things: who is logging in, which organizations
-they have, a badge naming one, and a license. Seven endpoints, all JWT, and
-every one of them is verified through `client.NewPki`, which fetches the key
-**from the parent itself**. Nothing is pinned. So a mock that serves the key it
-signs with is accepted by an ordinary production build — no `-tags devel`, no
-patched binary.
+they have, a badge naming one, and a license. The rig runs the real one,
+core-api, from core-api's own compose with a QA override: ports moved, its own
+config, no integrations indexer, no worker. It used to be a mock, which drifted
+from core-api without anything failing.
 
-That last part is why we do not use `POST /bootstrap/enroll/offline` instead.
-Offline licenses verify against hardcoded keys that only `SwapOfflineLicenseKeys`
-can replace, and that seam does not exist outside `-tags devel`. Taking it would
-mean QA could never test the binary we ship.
+Enrollment signs in the way the UI does, by email. core-api mails the link to
+Mailpit, and `enroll` plays the person: it opens the email, confirms, reads the
+completion code off the page, and hands it to plakman's poll.
+
+We do not use `POST /bootstrap/enroll/offline`. Offline licenses verify against
+hardcoded keys that only `SwapOfflineLicenseKeys` can replace, and that seam
+does not exist outside `-tags devel`. Taking it would mean QA could never test
+the binary we ship.
 
 ## Running it
 
-Needs the plakman checkout beside QA, and `GOPRIVATE=github.com/PlakarKorp/*`.
+Needs the plakman and core-api checkouts beside QA, and
+`GOPRIVATE=github.com/PlakarKorp/*`.
 
     make qa            # one run, tears down after
     make qa-keep       # same, leaves the instance up to poke at
 
-`PLAKMAN_SRC` points at the plakman tree (default `../../plakman`); `S3_VERSION`,
+`PLAKMAN_SRC` and `CORE_API_SRC` point at the trees (default `../../plakman`,
+`../../core-api`); `S3_VERSION`,
 `MIN_VERSIONS` and `RUN_DIR` override the rest. Logs land in `$RUN_DIR/logs`.
 
 ### The two phases
@@ -62,8 +68,7 @@ reasons that have nothing to do with plakman. `reset` does both.
 
 ### Pieces, if you want them by hand
 
-    ./bin/mock-parent -listen :8081
-    ./bin/enroll -parent http://localhost:8081 -plakman http://localhost:8080
+    ./bin/enroll -plakman http://localhost:8080 -mailpit http://localhost:8025
     ./bin/seed   -parent http://localhost:8081 -plakman http://localhost:8080 \
                  -s3-version v1.1.6 -retention-min-versions 1
     ./bin/catalog -name s3
@@ -159,7 +164,6 @@ truth was 98%. It now prefers the most specific match.
 ## On the plakman dependency
 
 The plan says scenarios should reach plakman only through `client`. That holds
-for scenarios. The mock parent is not a scenario — it has to mint the badges,
-challenges and licenses plakman will verify, so it imports `credentials`, `pki`
-and `api/v1/contract` as well. Worth keeping that split honest if a depguard
-rule ever lands here.
+for scenarios. `enroll` also imports `credentials` and `pki`, to verify the
+badge plakman mints. Worth keeping that split honest if a depguard rule ever
+lands here.

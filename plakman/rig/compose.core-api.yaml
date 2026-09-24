@@ -1,0 +1,20 @@
+# QA override for core-api's own compose: our config, host ports out of the
+# way, and no SSH agent, which only the integrations indexer needed.
+services:
+  db:
+    ports: !reset []
+
+  mailpit:
+    ports: !override
+      - "18025:8025"
+
+  api:
+    ports: !override
+      - "18081:8081"
+    environment: !reset
+      GOCACHE: /gocache
+    volumes: !override
+      - .:/src
+      - gocache:/gocache
+      - state:/var/lib/plakario
+      - ${QA_CORE_API_CONFIG:?set QA_CORE_API_CONFIG to the core-api config}:/etc/core-api/config.yaml:ro

@@ -31,8 +31,9 @@ func ok(step string, args ...any) {
 }
 
 func main() {
-	parentURL := flag.String("parent", "http://localhost:18081", "mock parent URL")
+	parentURL := flag.String("parent", "http://localhost:18081", "core-api URL")
 	plakmanURL := flag.String("plakman", "http://localhost:18080", "plakman URL")
+	orgName := flag.String("org", "Root organization", "root organization name, as enroll created it")
 	email := flag.String("email", "admin@example.com", "admin email")
 	password := flag.String("password", "foobar", "admin password")
 	invName := flag.String("inventory", "Self-managed inventory", "self-managed inventory name")
@@ -46,14 +47,28 @@ func main() {
 
 	// The root organization's id is the parent's: plakman mints its root under
 	// the id the badge named, so the parent is the cheapest place to read it.
+	// core-api seeds this user in dev mode.
+	var login api.LoginResponse
+	if err := parent.Client().Endpoint("/api/v1/auth/login/password").Post(struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}{"test@plakar.io", "foobar"}, &login); err != nil {
+		fail("log in to parent", err)
+	}
 	var orgs []api.OrganizationResponse
-	if err := parent.Client().Endpoint("/api/v1/account/organizations").Get(&orgs); err != nil {
+	if err := parent.Client(client.WithToken(login.Token)).Endpoint("/api/v1/account/organizations").Get(&orgs); err != nil {
 		fail("read organization from parent", err)
 	}
-	if len(orgs) == 0 {
-		fail("read organization from parent", errors.New("parent has no organizations; enroll first"))
+	// The parent's user has organizations of its own besides the one enrolled.
+	var orgID uuid.UUID
+	for _, o := range orgs {
+		if o.Name == *orgName {
+			orgID = o.Id
+		}
 	}
-	orgID := orgs[0].Id
+	if orgID == uuid.Nil {
+		fail("read organization from parent", errors.New("parent has no "+*orgName+"; enroll first"))
+	}
 	ok("root organization", orgID)
 
 	// A login names its organization, hence the <prefix>/<email> account form.
