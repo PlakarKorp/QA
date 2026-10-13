@@ -1,0 +1,94 @@
+# Reusable QA workflow for plakar integrations. Call it from the integration's
+# repository:
+#
+#   jobs:
+#     qa:
+#       uses: PlakarKorp/QA/.github/workflows/integration.yml@<ref>
+#       with: { dir: s3 }
+name: integration
+
+on:
+  workflow_call:
+    inputs:
+      dir:
+        description: directory holding the integration's go.mod, Makefile and manifest.yaml
+        type: string
+        required: true
+      plakar-version:
+        description: plakar used to package the integration
+        type: string
+        default: v1.1.7
+      validator-version:
+        description: ref of PlakarKorp/pkg to install the validator from
+        type: string
+        default: main
+      golangci-lint-version:
+        type: string
+        default: v2.14.0
+
+jobs:
+  package:
+    name: package and validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.dir }}/go.mod
+          cache-dependency-path: ${{ inputs.dir }}/go.sum
+
+      - name: install plakar and the validator
+        run: |
+          go install github.com/PlakarKorp/plakar@${{ inputs.plakar-version }}
+          go install github.com/PlakarKorp/pkg/cmd/validator@${{ inputs.validator-version }}
+
+      # The version only names the ptar, pkg create requires valid semver.
+      - name: build and package
+        run: make package VERSION=v0.0.0-ci
+
+      - name: validate the package
+        run: validator -v ./*.ptar
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.dir }}/go.mod
+          cache-dependency-path: ${{ inputs.dir }}/go.sum
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          working-directory: ${{ inputs.dir }}
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.dir }}/go.mod
+          cache-dependency-path: ${{ inputs.dir }}/go.sum
+
+      - name: test
+        run: go test -race ./...
