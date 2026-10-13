@@ -25,6 +25,12 @@ on:
       golangci-lint-version:
         type: string
         default: v2.14.0
+      # A reusable workflow cannot tell which ref it was called at, so set
+      # this to the same ref as `uses:`.
+      qa-ref:
+        description: ref of PlakarKorp/QA to take the shared lint config from
+        type: string
+        default: main
 
 jobs:
   package:
@@ -68,11 +74,21 @@ jobs:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
+      - name: checkout the shared lint config
+        uses: actions/checkout@v5
+        with:
+          repository: PlakarKorp/QA
+          ref: ${{ inputs.qa-ref }}
+          path: .qa
+          sparse-checkout: integrations/golangci.yml
+          sparse-checkout-cone-mode: false
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: ${{ inputs.golangci-lint-version }}
           working-directory: ${{ inputs.dir }}
+          args: --config ${{ github.workspace }}/.qa/integrations/golangci.yml
 
   test:
     name: test
