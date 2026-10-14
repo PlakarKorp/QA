@@ -4,7 +4,10 @@
 #   jobs:
 #     qa:
 #       uses: PlakarKorp/QA/.github/workflows/integration.yml@<ref>
-#       with: { dir: s3 }
+#       with: { dir: s3, qa-version-file: s3/.qa-version }
+#
+# The QA version pins the lint rules and tool versions in integrations/, apart
+# from `uses:`: bumping it can break the build, so do it on purpose.
 name: integration
 
 on:
@@ -14,23 +17,51 @@ on:
         description: directory holding the integration's go.mod and manifest.yaml
         type: string
         required: true
-      validator-version:
-        description: ref of PlakarKorp/pkg to install the validator from
+      qa-version-file:
+        description: file holding the version of PlakarKorp/QA to take the lint rules and tools from, relative to the repository root; main if unset
         type: string
-        default: main
-      golangci-lint-version:
-        type: string
-        default: v2.14.0
-      # A reusable workflow cannot tell which ref it was called at, so set
-      # this to the same ref as `uses:`.
-      qa-ref:
-        description: ref of PlakarKorp/QA to take the shared lint config from
-        type: string
-        default: main
+        default: ''
 
 jobs:
+  versions:
+    name: versions
+    runs-on: ubuntu-latest
+    outputs:
+      qa: ${{ steps.qa.outputs.version }}
+      golangci-lint: ${{ steps.tools.outputs.golangci-lint }}
+      validator: ${{ steps.tools.outputs.validator }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: resolve the QA version
+        id: qa
+        env:
+          QA_VERSION_FILE: ${{ inputs.qa-version-file }}
+        run: |
+          QA_VERSION=main
+          if [ -n "$QA_VERSION_FILE" ]; then
+            QA_VERSION=$(tr -d '[:space:]' < "$QA_VERSION_FILE")
+          fi
+          echo "version=$QA_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: checkout the QA tool versions
+        uses: actions/checkout@v7
+        with:
+          repository: PlakarKorp/QA
+          ref: ${{ steps.qa.outputs.version }}
+          path: .qa
+          sparse-checkout: integrations/versions
+          sparse-checkout-cone-mode: false
+
+      # The file is already in key=value form.
+      - name: read the QA tool versions
+        id: tools
+        run: cat .qa/integrations/versions >> "$GITHUB_OUTPUT"
+
   validate:
     name: validate
+    needs: versions
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -46,13 +77,14 @@ jobs:
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
       - name: install the validator
-        run: go install github.com/PlakarKorp/pkg/cmd/validator@${{ inputs.validator-version }}
+        run: go install github.com/PlakarKorp/pkg/cmd/validator@${{ needs.versions.outputs.validator }}
 
       - name: validate the integration
         run: validator -v repo .
 
   lint:
     name: lint
+    needs: versions
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -68,7 +100,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: PlakarKorp/QA
-          ref: ${{ inputs.qa-ref }}
+          ref: ${{ needs.versions.outputs.qa }}
           path: .qa
           sparse-checkout: integrations/golangci.yml
           sparse-checkout-cone-mode: false
@@ -76,7 +108,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: ${{ inputs.golangci-lint-version }}
+          version: ${{ needs.versions.outputs.golangci-lint }}
           working-directory: ${{ inputs.dir }}
           args: --config ${{ github.workspace }}/.qa/integrations/golangci.yml
 
