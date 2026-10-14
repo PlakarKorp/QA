@@ -11,13 +11,9 @@ on:
   workflow_call:
     inputs:
       dir:
-        description: directory holding the integration's go.mod, Makefile and manifest.yaml
+        description: directory holding the integration's go.mod and manifest.yaml
         type: string
         required: true
-      plakar-version:
-        description: plakar used to package the integration
-        type: string
-        default: v1.1.7
       validator-version:
         description: ref of PlakarKorp/pkg to install the validator from
         type: string
@@ -33,8 +29,8 @@ on:
         default: main
 
 jobs:
-  package:
-    name: package and validate
+  validate:
+    name: validate
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -49,17 +45,11 @@ jobs:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
-      - name: install plakar and the validator
-        run: |
-          go install github.com/PlakarKorp/plakar@${{ inputs.plakar-version }}
-          go install github.com/PlakarKorp/pkg/cmd/validator@${{ inputs.validator-version }}
+      - name: install the validator
+        run: go install github.com/PlakarKorp/pkg/cmd/validator@${{ inputs.validator-version }}
 
-      # The version only names the ptar, pkg create requires valid semver.
-      - name: build and package
-        run: make package VERSION=v0.0.0-ci
-
-      - name: validate the package
-        run: validator -v ./*.ptar
+      - name: validate the integration
+        run: validator -v repo .
 
   lint:
     name: lint
