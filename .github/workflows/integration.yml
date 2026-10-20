@@ -32,7 +32,7 @@ jobs:
       validator: ${{ steps.tools.outputs.validator }}
     steps:
       - name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: resolve the QA version
         id: qa
@@ -46,7 +46,7 @@ jobs:
           echo "version=$QA_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: checkout the QA tool versions
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PlakarKorp/QA
           ref: ${{ steps.qa.outputs.version }}
@@ -68,10 +68,10 @@ jobs:
         working-directory: ${{ inputs.dir }}
     steps:
       - name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
@@ -88,16 +88,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
       - name: checkout the shared lint config
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PlakarKorp/QA
           ref: ${{ needs.versions.outputs.qa }}
@@ -106,7 +106,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: ${{ needs.versions.outputs.golangci-lint }}
           working-directory: ${{ inputs.dir }}
@@ -120,10 +120,10 @@ jobs:
         working-directory: ${{ inputs.dir }}
     steps:
       - name: checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
