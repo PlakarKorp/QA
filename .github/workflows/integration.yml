@@ -76,7 +76,15 @@ jobs:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
+      - name: cache the validator
+        id: validator-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin/validator
+          key: validator-${{ runner.os }}-${{ needs.versions.outputs.validator }}
+
       - name: install the validator
+        if: steps.validator-cache.outputs.cache-hit != 'true'
         run: go install github.com/PlakarKorp/pkg/cmd/validator@${{ needs.versions.outputs.validator }}
 
       - name: validate the integration
