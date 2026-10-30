@@ -1,6 +1,9 @@
 # QA override: moves published host ports out of the way. Nothing here changes
 # plakman itself. The parent is core-api, stood up from its own compose; see
 # compose.core-api.yaml.
+#
+# The ports are variables so a rig can run beside another stack on the same
+# machine: qa.sh exports them from DB_PORT and GARAGE_PORT.
 services:
   plakman:
     depends_on:
@@ -8,10 +11,16 @@ services:
     ports: !override
       - "18080:8080"
 
-  # MinIO removed their Docker Hub image; the rig has to name a registry that
-  # still serves it.
-  minio:
-    image: quay.io/minio/minio:latest
+  db:
+    ports: !override
+      - "${QA_DB_PORT:-15432}:5432"
+
+  # The S3 server plakman's compose ships. Only the S3 API and the admin API
+  # are published: the rpc and web ports are the container's own business.
+  garage:
+    ports: !override
+      - "${QA_GARAGE_PORT:-3900}:3900"
+      - "${QA_GARAGE_ADMIN_PORT:-3903}:3903"
 
   # The orkestrator the daemon proxies release-feed, update and network calls
   # to. compose builds it from plakman's cmd/mock-orkestrator; we bind-mount a
