@@ -15,6 +15,8 @@ in source-of-truth.
     cmd/enroll        drives a fresh instance through enrollment
     cmd/seed          brings an enrolled instance to what the scenarios assume
     cmd/catalog       prints the catalog as the instance sees it
+    api/              the API contract scenarios: v1 through pcpctl, v2 mirroring
+                      them one for one (see api/README.md)
     rig/compose.qa.yaml  overrides plakman's compose for a QA stack
     rig/compose.core-api.yaml, rig/core-api.qa.yaml
                          run core-api from its own compose as the parent
@@ -48,10 +50,16 @@ Needs the plakman and core-api checkouts beside QA, and
 
     make qa            # one run, tears down after
     make qa-keep       # same, leaves the instance up to poke at
+    make instance      # an enrolled, seeded instance, left standing
+    make api           # the API scenarios against it (api-v1, api-v2 for one side)
 
-`PLAKMAN_SRC` and `CORE_API_SRC` point at the trees (default `../../plakman`,
-`../../core-api`); `S3_VERSION`,
-`MIN_VERSIONS` and `RUN_DIR` override the rest. Logs land in `$RUN_DIR/logs`.
+`PLAKMAN_SRC`, `CORE_API_SRC` and `PCPCTL_SRC` point at the trees (default
+`../../plakman`, `../../core-api`, `../../pcpctl`); `S3_VERSION` pins the s3
+package to install (default: the newest the catalog offers -- it offers one
+version per integration, so an older pin cannot be installed), and
+`MIN_VERSIONS`, `RUN_DIR`, `DB_PORT`, `GARAGE_PORT` and `GARAGE_ADMIN_PORT`
+override the rest, the ports so a rig can run beside another stack. Logs land
+in `$RUN_DIR/logs`.
 
 ### The two phases
 
@@ -150,8 +158,17 @@ truth was 98%. It now prefers the most specific match.
 - `cached` binds a unix socket under the state directory, so a long state path
   fails with `bind: invalid argument`. Keep it short.
 - The executor wants `SSH_AUTH_SOCK` and refuses to initialise without one.
-- MinIO no longer serves its Docker Hub image; `rig/compose.qa.yaml` points at
-  quay.io.
+- plakman's compose moved from MinIO to garage, and its bucket setup
+  (`scripts/setup-garage.sh`) goes through the stack's vault and sftp
+  containers, which the rig does not run. The rig brings garage up but does
+  not provision buckets, so the data-path e2e tests in plakman's suite have no
+  store to write to; the API scenarios need none.
+- plakman's `TestOAuth*` tests (and `TestSessionTellsTheAuthMethod`) fail
+  against the rig with 404s: the daemon mounts OAuth only when `api.oauth` is
+  configured, and the rig's generated `plakman.yaml` does not set it yet.
+- `plakman_stop` kills only the daemon this run started, by its pid. A bare
+  `pgrep -x plakman` once stopped another plakman running on the machine and
+  left ours holding the port, which the next phase then tested by mistake.
 - The credential-free seed is smaller than expected: `.seed-admin.yaml`'s minio
   connectors already hardcode `minioadmin`. Only SFTP and the AWS/Scaleway
   entries need gopass.

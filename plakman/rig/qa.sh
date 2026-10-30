@@ -13,6 +13,7 @@ set -u -o pipefail
 QA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLAKMAN_SRC="${PLAKMAN_SRC:-$QA_ROOT/../../plakman}"
 CORE_API_SRC="${CORE_API_SRC:-$QA_ROOT/../../core-api}"
+PCPCTL_SRC="${PCPCTL_SRC:-$QA_ROOT/../../pcpctl}"
 
 # Short on purpose: cached binds a unix socket under the state directory and
 # the path limit is ~108 bytes, which a deep scratch path blows.
@@ -25,8 +26,13 @@ LOGS="$RUN_DIR/logs"
 PLAKMAN_PORT="${PLAKMAN_PORT:-18080}"
 PARENT_PORT="${PARENT_PORT:-18081}"
 DB_PORT="${DB_PORT:-15432}"
+GARAGE_PORT="${GARAGE_PORT:-3900}"
+GARAGE_ADMIN_PORT="${GARAGE_ADMIN_PORT:-3903}"
 MINIO_HOST="${MINIO_HOST:-localhost}"
-S3_VERSION="${S3_VERSION:-v1.1.6}"
+# The catalog offers one version per integration, the newest for the edition,
+# so a pin older than that can never be installed: the default takes what the
+# catalog offers, and S3_VERSION pins a run to a version it is known to list.
+S3_VERSION="${S3_VERSION:-}"
 MIN_VERSIONS="${MIN_VERSIONS:-1}"
 # What phase 2 runs. Everything, by default: most of plakman's suite is
 # permission and misuse coverage, and all of it is worth running against a real
@@ -38,7 +44,10 @@ PLAKMAN_URL="http://localhost:$PLAKMAN_PORT"
 PARENT_URL="http://localhost:$PARENT_PORT"
 DB_URL="postgres://plakman:plakman@localhost:$DB_PORT/plakman"
 
-COMPOSE=(docker compose -f "$PLAKMAN_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.qa.yaml")
+# Our own project name, so the rig never shares containers or volumes with a
+# stack someone runs from the plakman checkout itself.
+COMPOSE=(docker compose -p qa-plakman -f "$PLAKMAN_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.qa.yaml")
+export QA_DB_PORT="$DB_PORT" QA_GARAGE_PORT="$GARAGE_PORT" QA_GARAGE_ADMIN_PORT="$GARAGE_ADMIN_PORT"
 # core-api's compose interpolates SSH_AUTH_SOCK before our override drops the
 # mount that uses it, so it only has to be set.
 PARENT=(env SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-/dev/null}" docker compose -p qa-core-api -f "$CORE_API_SRC/compose.yaml" -f "$QA_ROOT/rig/compose.core-api.yaml")
@@ -71,6 +80,10 @@ build() {
   # the rig's biggest compromise -- it tests a plakman, not the shipped one.
   ( cd "$PLAKMAN_SRC" && go build -o "$QA_ROOT/bin/" ./cmd/plakman ./cmd/plaklet ./cmd/cached ) \
     || die "plakman failed to build (is GOPRIVATE set, and an SSH key loaded?)"
+  # The v1 API scenarios drive the instance through pcpctl, the way a person
+  # or a script does, so the contract under test is the one pcpctl speaks.
+  ( cd "$PCPCTL_SRC" && go build -o "$QA_ROOT/bin/pcpctl" ./cmd/pcpctl ) \
+    || die "pcpctl failed to build (is PCPCTL_SRC a pcpctl checkout?)"
   # The daemon proxies release-feed, update and network calls to an orkestrator
   # and answers 500 without one, which is a failure about the rig rather than
   # about plakman. plakman ships the mock; we just run it.
@@ -84,14 +97,17 @@ build() {
 infra_up() {
   log "infrastructure"
   docker network inspect plakario_network >/dev/null 2>&1 || docker network create plakario_network >/dev/null
-  "${COMPOSE[@]}" up -d --remove-orphans db minio orkestrator >/dev/null 2>&1 || die "compose up failed"
+  "${COMPOSE[@]}" up -d --remove-orphans db garage orkestrator >/dev/null 2>&1 || die "compose up failed"
   "${PARENT[@]}" up -d --build db mailpit api >/dev/null 2>&1 || die "core-api compose up failed"
-  wait_for "http://localhost:9000/minio/health/live" "minio"
+  wait_for "http://localhost:$GARAGE_ADMIN_PORT/health" "garage"
   # Long: the api container compiles core-api on start.
   wait_for "$PARENT_URL/health/ready" "core-api" 600
   wait_for "$ORKESTRATOR_URL/feed" "mock orkestrator"
-  ( cd "$PLAKMAN_SRC" && sh scripts/create-buckets.sh >/dev/null 2>&1 ) || die "bucket creation failed"
-  note "db :$DB_PORT   minio :9000   parent :$PARENT_PORT   orkestrator :${ORKESTRATOR_PORT:-18083}"
+  # plakman's compose moved from MinIO to garage, and its bucket setup
+  # (scripts/setup-garage.sh) now goes through the stack's vault and sftp
+  # containers, which the rig does not run. The buckets the data-path e2e
+  # tests want are therefore not provisioned here; the API scenarios need none.
+  note "db :$DB_PORT   garage :$GARAGE_PORT   parent :$PARENT_PORT   orkestrator :${ORKESTRATOR_PORT:-18083}"
 }
 
 # reset wipes both halves of the instance identity: plakman's database and
@@ -102,8 +118,8 @@ infra_up() {
 reset() {
   log "reset (plakman + parent)"
   plakman_stop
-  docker exec plakman-db-1 psql -U plakman -d postgres -c "DROP DATABASE IF EXISTS plakman;" >/dev/null 2>&1
-  docker exec plakman-db-1 psql -U plakman -d postgres -c "CREATE DATABASE plakman OWNER plakman;" >/dev/null 2>&1
+  "${COMPOSE[@]}" exec -T db psql -U plakman -d postgres -c "DROP DATABASE IF EXISTS plakman;" >/dev/null 2>&1
+  "${COMPOSE[@]}" exec -T db psql -U plakman -d postgres -c "CREATE DATABASE plakman OWNER plakman;" >/dev/null 2>&1
   rm -rf "$STATE"; mkdir -p "$STATE/pkgs"
   # core-api migrates and seeds its dev user on boot, so a fresh database and a
   # restart give a parent that has never issued anything.
@@ -149,11 +165,19 @@ api:
       plakario: false
       plakarui: true
     cors: true
+  # The v2 scenarios need the surface mounted; deployments leave it off.
+  v2:
+    enabled: true
 YAML
 }
 
 plakman_start() { # plakman_start <phase>
   plakman_config
+  # A plakman of someone else's on our port would answer our health check and
+  # take the whole run, so refuse rather than test the wrong daemon.
+  if curl -sf -o /dev/null "$PLAKMAN_URL/health"; then
+    die "something already answers on $PLAKMAN_URL; pick another PLAKMAN_PORT"
+  fi
   # The executor refuses to initialise without an agent, so the rig owns one.
   if [ -z "${SSH_AUTH_SOCK:-}" ]; then
     eval "$(ssh-agent -s)" >/dev/null
@@ -168,14 +192,25 @@ plakman_start() { # plakman_start <phase>
     PLAKMAN_NET_CONFIGURE_URL="$ORKESTRATOR_URL/net/configure" \
     "$QA_ROOT/bin/plakman" -config "$STATE/plakman.yaml" -foreground \
     > "$LOGS/plakman.${1:-run}.log" 2>&1 &
+  echo $! > "$RUN_DIR/plakman.pid"
   disown
   wait_for "$PLAKMAN_URL/health" "plakman"
 }
 
+# plakman_stop stops the daemon this run started and nothing else: a developer
+# machine runs other plakmans, and a bare pgrep once stopped one of those and
+# left ours holding the port.
 plakman_stop() {
-  local pid; pid="$(pgrep -x plakman | head -1)"
-  [ -n "$pid" ] && kill "$pid" 2>/dev/null && sleep 1
-  return 0
+  if [ -f "$RUN_DIR/plakman.pid" ]; then
+    kill "$(cat "$RUN_DIR/plakman.pid")" 2>/dev/null
+    rm -f "$RUN_DIR/plakman.pid"
+  fi
+  pkill -f "^$QA_ROOT/bin/plakman " 2>/dev/null
+  for _ in $(seq 1 30); do
+    curl -sf -o /dev/null "$PLAKMAN_URL/health" || return 0
+    sleep 1
+  done
+  die "the plakman on $PLAKMAN_URL did not stop"
 }
 
 # --- the suite -------------------------------------------------------------
@@ -190,6 +225,24 @@ run_suite() { # run_suite <name> <-run regexp> <outfile>
     PLAKMAN_REQUIRE_INFRA=1 \
     go test -tags devel -count=1 -v -timeout 35m ./tests/ -run "$2" ${4:+-skip "$4"} ) > "$3" 2>&1
   return $?
+}
+
+# run_api runs one API scenario package against the standing instance and
+# prints one line per scenario, subtests included, so the summary names the
+# contract that broke rather than the file it lives in.
+run_api() { # run_api <v1|v2> <outfile>
+  ( cd "$QA_ROOT" && \
+    PLAKMAN_URL="$PLAKMAN_URL" PLAKMAN_PARENT="$PARENT_URL" \
+    PCPCTL_BIN="$QA_ROOT/bin/pcpctl" \
+    go test "./api/$1/..." -count=1 -v -timeout 20m ) > "$2" 2>&1
+  local rc=$?
+  grep -E '^\s*--- (PASS|FAIL|SKIP)' "$2" | sed -E 's/^ *//; s/^--- //; s/ \(.*\)$//' \
+    | awk -v v="$1" '{printf "    %-5s %s/%s\n", $1, v, $2}'
+  if [ "$rc" -ne 0 ] && ! grep -qE '^\s*--- FAIL' "$2"; then
+    # Nothing ran: a build failure or a harness that could not connect.
+    sed 's/^/    /' "$2" | tail -20
+  fi
+  return $rc
 }
 
 # --- the run ---------------------------------------------------------------
@@ -230,6 +283,17 @@ main() {
   p2=$?
   grep -E '^--- (PASS|FAIL|SKIP)' "$LOGS/scenarios.out" | sed 's/^/    /' || true
 
+  # The API contract, service by service: v1 as pcpctl drives it, then v2
+  # mirroring every v1 scenario by name. A v2 scenario that fails names the
+  # v1 feature it mirrors, so a red line here is either a broken contract or
+  # a parity gap. See api/README.md.
+  log "api v1 scenarios (pcpctl)"
+  run_api v1 "$LOGS/api-v1.out"
+  p4=$?
+  log "api v2 scenarios (parity)"
+  run_api v2 "$LOGS/api-v2.out"
+  p5=$?
+
   log "plakman suite"
   run_suite suite "$SUITE" "$LOGS/suite.out" 'TestBootstrap$'
   p3=$?
@@ -258,12 +322,12 @@ main() {
   else
     log "teardown"
     plakman_stop
-    "${COMPOSE[@]}" stop db minio >/dev/null 2>&1
+    "${COMPOSE[@]}" stop db garage orkestrator >/dev/null 2>&1
     "${PARENT[@]}" stop >/dev/null 2>&1
     [ -n "${QA_OWNS_AGENT:-}" ] && kill "$QA_OWNS_AGENT" 2>/dev/null
   fi
 
-  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ]
+  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ] && [ "$p4" -eq 0 ] && [ "$p5" -eq 0 ]
 }
 
 main "$@"

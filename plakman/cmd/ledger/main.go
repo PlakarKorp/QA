@@ -116,8 +116,16 @@ func main() {
 	// path matches nothing is worth seeing: it is either a route the daemon
 	// never announced (the kloset group mounts without logging) or a path that
 	// fell through to the UI, which is what a removed API route looks like.
+	// The v2 surfaces are mounted without announcing their routes, so the
+	// ledger cannot credit them; they are counted apart rather than listed as
+	// strays, one line per surface.
 	unmatched := map[string]int{}
+	other := map[string]int{}
 	for _, r := range requests {
+		if surface := otherSurface(r.path); surface != "" {
+			other[surface]++
+			continue
+		}
 		trimmed := strings.TrimPrefix(r.path, apiPrefix)
 		best, bestScore, found := route{}, -1, false
 		for rt := range universe {
@@ -182,6 +190,18 @@ func main() {
 		}
 	}
 
+	if len(other) > 0 {
+		fmt.Printf("\nrequests to surfaces the daemon does not announce:\n")
+		keys := make([]string, 0, len(other))
+		for k := range other {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  %-70s %d\n", k, other[k])
+		}
+	}
+
 	if len(unmatched) > 0 {
 		fmt.Printf("\nrequests matching no announced route (%d distinct):\n", len(unmatched))
 		keys := make([]string, 0, len(unmatched))
@@ -193,4 +213,16 @@ func main() {
 			fmt.Printf("  %-70s %d\n", k, unmatched[k])
 		}
 	}
+}
+
+// otherSurface names the surface a path belongs to when it is one the daemon
+// mounts without logging its routes: /api/v2, the internal machine protocol
+// and the v2 UI contract. Empty for the v1 API and everything else.
+func otherSurface(path string) string {
+	for _, prefix := range []string{"/api/v2/", "/api/internal/", "/ui/v2/"} {
+		if strings.HasPrefix(path, prefix) {
+			return prefix + "..."
+		}
+	}
+	return ""
 }

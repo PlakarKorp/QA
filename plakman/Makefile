@@ -6,9 +6,12 @@ PLAKMAN_SRC ?= $(SRC_ROOT)/plakman
 
 # The parent plakman enrolls against. The rig runs core-api from its own compose.
 CORE_API_SRC ?= $(SRC_ROOT)/core-api
-export PLAKMAN_SRC CORE_API_SRC
 
-.PHONY: all build qa qa-keep instance scenarios bench clean
+# The CLI the v1 API scenarios drive the instance through.
+PCPCTL_SRC ?= $(SRC_ROOT)/pcpctl
+export PLAKMAN_SRC CORE_API_SRC PCPCTL_SRC
+
+.PHONY: all build qa qa-keep instance scenarios api api-v1 api-v2 bench clean
 
 all: build
 
@@ -31,6 +34,19 @@ instance:
 # Our own scenarios, against a standing instance (see `make instance`).
 scenarios:
 	$(GO) test ./scenarios/... -count=1 -v
+
+# The API contract scenarios, against a standing instance: v1 through pcpctl,
+# then v2 mirroring every v1 scenario. See api/README.md.
+api: api-v1 api-v2
+
+api-v1: bin/pcpctl
+	PCPCTL_BIN=$(CURDIR)/bin/pcpctl $(GO) test ./api/v1/... -count=1 -v
+
+api-v2:
+	$(GO) test ./api/v2/... -count=1 -v
+
+bin/pcpctl:
+	cd $(PCPCTL_SRC) && $(GO) build -o $(CURDIR)/bin/pcpctl ./cmd/pcpctl
 
 bench:
 	@echo 'plakman: no benchmarks yet'
