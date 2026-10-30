@@ -1,0 +1,64 @@
+# Sends a Go coverage profile to kortex and, optionally, fails under a
+# threshold. Use it in the job that ran the tests, after them:
+#
+#   permissions:
+#     contents: read
+#     id-token: write
+#   steps:
+#     - run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+#     - uses: PlakarKorp/QA/.github/actions/coverage@<ref>
+#       if: ${{ !cancelled() }}
+#       with: { min-coverage: 80 }
+#
+# The upload authenticates with the job's OIDC token, so there is no secret,
+# only `id-token: write`. A failed upload is a warning, as the uploader reports
+# it. The threshold needs Go, which the job already set up to run the tests.
+name: kortex coverage
+description: Send a Go coverage profile to kortex, and fail under a threshold.
+inputs:
+  profile:
+    description: the coverage profile go test wrote
+    default: coverage.out
+  min-coverage:
+    description: total coverage in percent under which the step fails; no threshold if unset
+    default: ''
+  flag:
+    description: flag naming the test suite in kortex, e.g. unit or e2e
+    default: ''
+  kortex-url:
+    description: the kortex api
+    default: https://kortex.plakar.io
+runs:
+  using: composite
+  steps:
+    # The uploader is downloaded from kortex rather than taken from its
+    # action: kortex is internal and QA is public, and a public repository
+    # cannot use an internal repository's action.
+    - name: upload coverage to kortex
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        FLAG: ${{ inputs.flag }}
+        KORTEX_URL: ${{ inputs.kortex-url }}
+      run: |
+        bin="$RUNNER_TEMP/kortex"
+        if ! { curl -fsSL "$KORTEX_URL/dl/kortex-linux-amd64" -o "$bin" && chmod +x "$bin"; }; then
+          echo "::warning title=kortex coverage upload::could not fetch the uploader"
+          exit 0
+        fi
+        args=(coverage upload --url "$KORTEX_URL")
+        if [ -n "$FLAG" ]; then args+=(--flag "$FLAG"); fi
+        "$bin" "${args[@]}" "$PROFILE"
+
+    # After the upload, so a drop in coverage still shows up in kortex.
+    - name: coverage threshold
+      if: ${{ inputs.min-coverage != '' }}
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        MIN_COVERAGE: ${{ inputs.min-coverage }}
+      run: |
+        total=$(go tool cover -func="$PROFILE" | awk '/^total:/ { sub("%", "", $3); print $3 }')
+        echo "total coverage: ${total}%"
+        awk -v t="$total" -v m="$MIN_COVERAGE" 'BEGIN { exit !(t >= m) }' ||
+          { echo "coverage fell below ${MIN_COVERAGE}%"; exit 1; }
