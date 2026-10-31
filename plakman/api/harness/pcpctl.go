@@ -44,10 +44,27 @@ type Pcpctl struct {
 	// own, as --organization would; empty means the key's.
 	Organization string
 
+	// Stdin is fed to the command, for what pcpctl reads there rather than
+	// from a flag: a password, a CSV to import.
+	Stdin string
+
 	// config is a file that does not exist, so the developer's own
 	// ~/.config/pcpctl/config.json never leaks into a run.
 	config string
 }
+
+// API is the wire the scenarios run pcpctl on: PCPCTL_API in the
+// environment, which the rig sets for the phase that runs the v1 scenarios
+// over v2, else v1. pcpctl reads the same variable.
+func API() string {
+	if api := os.Getenv("PCPCTL_API"); api != "" {
+		return api
+	}
+	return "v1"
+}
+
+// OnV2 reports whether the scenarios run pcpctl on the v2 wire.
+func OnV2() bool { return API() == "v2" }
 
 // NewPcpctl locates the binary: $PCPCTL_BIN, else bin/pcpctl under the module
 // root, which is where the rig builds it. A missing binary is an error the
@@ -83,6 +100,13 @@ func (p *Pcpctl) In(organization string) *Pcpctl {
 	return &c
 }
 
+// WithStdin returns a copy whose commands read the text on standard input.
+func (p *Pcpctl) WithStdin(text string) *Pcpctl {
+	c := *p
+	c.Stdin = text
+	return &c
+}
+
 // Result is what one invocation left behind.
 type Result struct {
 	Args   []string
@@ -113,6 +137,9 @@ func (p *Pcpctl) Run(t testing.TB, args ...string) Result {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if p.Stdin != "" {
+		cmd.Stdin = strings.NewReader(p.Stdin)
+	}
 
 	started := time.Now()
 	err := cmd.Run()
@@ -143,9 +170,10 @@ func (p *Pcpctl) OK(t testing.TB, args ...string) string {
 }
 
 // JSON runs a command with -o json, requires success, and decodes the output.
+// The flag goes before a "--", after which everything is an argument.
 func (p *Pcpctl) JSON(t testing.TB, out any, args ...string) {
 	t.Helper()
-	res := p.Run(t, append(args, "-o", "json")...)
+	res := p.Run(t, withOutput(args, "json")...)
 	if res.Code != ExitOK {
 		t.Fatalf("expected success\n%s", res)
 	}
@@ -153,6 +181,20 @@ func (p *Pcpctl) JSON(t testing.TB, out any, args ...string) {
 		t.Fatalf("pcpctl %s: output is not the JSON expected: %v\n%s",
 			strings.Join(args, " "), err, res.Stdout)
 	}
+}
+
+// withOutput adds -o <format> to the arguments, before a "--" when there is
+// one.
+func withOutput(args []string, format string) []string {
+	for i, a := range args {
+		if a == "--" {
+			out := make([]string, 0, len(args)+2)
+			out = append(out, args[:i]...)
+			out = append(out, "-o", format)
+			return append(out, args[i:]...)
+		}
+	}
+	return append(args, "-o", format)
 }
 
 // Fails runs a command that must fail with exactly this exit code, since the
@@ -165,4 +207,20 @@ func (p *Pcpctl) Fails(t testing.TB, code int, args ...string) Result {
 		t.Fatalf("expected exit %d\n%s", code, res)
 	}
 	return res
+}
+
+// NotOnV2 is a feature v1 has and v2 does not. On the v2 wire it runs the
+// command and asserts pcpctl's own refusal -- exit 1, saying the feature is
+// not available on API v2, which is the contract there -- and answers true
+// so the scenario skips the rest. On v1 it runs nothing and answers false.
+func (p *Pcpctl) NotOnV2(t testing.TB, args ...string) bool {
+	t.Helper()
+	if !OnV2() {
+		return false
+	}
+	res := p.Fails(t, ExitError, args...)
+	if !strings.Contains(res.Stderr, "not available on API v2") {
+		t.Fatalf("expected pcpctl to say the feature is not available on API v2\n%s", res)
+	}
+	return true
 }

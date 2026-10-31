@@ -4,7 +4,10 @@
 package apiv2
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -423,4 +426,101 @@ func TestInventoryClassesAndCoverage(t *testing.T) {
 		v2.OK(t, http.MethodGet, "/api/v2/reports/inventory-coverage", nil, &after)
 		return after.Unprotected == before.Unprotected+1 && after.Protected == before.Protected
 	}, 30*time.Second, 2*time.Second, "an unprotected resource counts as such")
+}
+
+// TestInventoryExtras: an inventory is patched, takes resources from a CSV
+// import, and a resource is left out of the coverage count and counted
+// again, and carries its addresses; a cloud provider is created with no
+// configuration, installing its integration on the way. The sync, its
+// period, the secrets and the capabilities are v1's.
+func TestInventoryExtras(t *testing.T) {
+	requireInstance(t)
+	inv := createInventory(t, v2, harness.Unique("qa-inv"))
+	r := addResource(t, v2, inv.ID, "addressed", map[string]any{"endpoints": []map[string]string{{"endpoint": "127.0.0.1"}}})
+
+	t.Run("sync", func(t *testing.T) {
+		gap(t, "re-read an inventory from its provider on demand, or set how often it is (v1 GET /inventories/{id}/sync, PATCH .../sync-period; pcpctl inventory sync, sync-period)")
+	})
+	t.Run("secrets and capabilities", func(t *testing.T) {
+		gap(t, "reveal an inventory's secrets, or say what the caller may do to it (v1 GET /inventories/{id}/secrets, /capabilities; pcpctl inventory secrets, capabilities)")
+	})
+	t.Run("update", func(t *testing.T) {
+		// Its own inventory: the patch empties the one it renames.
+		own := createInventory(t, v2, harness.Unique("qa-inv"))
+		kept := addResource(t, v2, own.ID, "kept", nil)
+		var updated inventory
+		v2.OK(t, http.MethodPatch, "/api/v2/inventories/"+own.ID, map[string]any{"name": own.Name + "-renamed"}, &updated)
+		require.Equal(t, own.ID, updated.ID)
+		require.Equal(t, own.Name+"-renamed", updated.Name)
+		var got inventory
+		v2.OK(t, http.MethodGet, "/api/v2/inventories/"+own.ID, nil, &got)
+		require.Equal(t, own.Name+"-renamed", got.Name)
+		v2.Refused(t, http.MethodPatch, "/api/v2/inventories/"+own.ID, map[string]any{"name": ""}, harness.CodeInvalidArgument)
+		v2.Refused(t, http.MethodPatch, "/api/v2/inventories/"+missing, map[string]any{"name": "ghost"}, harness.CodeNotFound)
+		t.Run("resources", func(t *testing.T) {
+			finding(t, "PATCH /inventories/{id} (a rename) empties the inventory's resources; v1's reconfiguration keeps them")
+			require.Contains(t, resourceIDs(t, v2, "&inventory_id="+own.ID), kept.ID, "a patch keeps the resources")
+		})
+	})
+	t.Run("endpoints", func(t *testing.T) {
+		var got resource
+		v2.OK(t, http.MethodGet, "/api/v2/resources/"+r.ID, nil, &got)
+		require.Len(t, got.Endpoints, 1)
+		require.Equal(t, "127.0.0.1", got.Endpoints[0].Endpoint)
+	})
+	t.Run("coverage exclusion", func(t *testing.T) {
+		var before struct {
+			Excluded int `json:"excluded"`
+		}
+		v2.OK(t, http.MethodGet, "/api/v2/reports/inventory-coverage", nil, &before)
+		var got resource
+		v2.OK(t, http.MethodPatch, "/api/v2/resources/"+r.ID, map[string]any{"excluded_from_coverage": true}, &got)
+		require.Equal(t, "excluded", got.Coverage)
+		var after struct {
+			Excluded int `json:"excluded"`
+		}
+		v2.OK(t, http.MethodGet, "/api/v2/reports/inventory-coverage", nil, &after)
+		require.Equal(t, before.Excluded+1, after.Excluded)
+		v2.OK(t, http.MethodPatch, "/api/v2/resources/"+r.ID, map[string]any{"excluded_from_coverage": false}, &got)
+		require.NotEqual(t, "excluded", got.Coverage)
+		v2.Refused(t, http.MethodPatch, "/api/v2/resources/"+missing, map[string]any{"excluded_from_coverage": true}, harness.CodeNotFound)
+	})
+	t.Run("import", func(t *testing.T) {
+		bulk := createInventory(t, v2, harness.Unique("qa-bulk"))
+		urn := "urn:qa:" + harness.Unique("imported")
+		status, raw := v2.Do(t, http.MethodPost, "/api/v2/inventories/"+bulk.ID+"/actions/import-resources", nil)
+		require.Equal(t, http.StatusBadRequest, status, "an import with nothing to import: %s", raw)
+
+		req, err := http.NewRequest(http.MethodPost, v2.Base+"/api/v2/inventories/"+bulk.ID+"/actions/import-resources",
+			strings.NewReader("compute;imported;"+urn+";10.0.0.1\n"))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "text/csv")
+		req.Header.Set("Authorization", "Bearer "+v2.Token)
+		resp, err := v2.HTTP.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		body, _ := io.ReadAll(resp.Body)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+		var imported struct {
+			Total int        `json:"total"`
+			Items []resource `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(body, &imported))
+		require.Len(t, imported.Items, 1)
+		require.Equal(t, "imported", imported.Items[0].Name)
+		require.Len(t, resourceIDs(t, v2, "&inventory_id="+bulk.ID), 1, "the import is the inventory's whole set")
+	})
+	t.Run("generic creation", func(t *testing.T) {
+		// One route takes every provider as a type; a provider whose
+		// integration is in the store is installed on the way, and one the
+		// store does not know is refused.
+		name := harness.Unique("qa-generic")
+		var created inventory
+		v2.OK(t, http.MethodPost, "/api/v2/inventories", map[string]any{"type": "self-managed", "name": name}, &created)
+		t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/inventories/"+created.ID+"?force=true", nil) })
+		require.Equal(t, name, created.Name)
+		require.Contains(t, integrationName(t, v2, created.IntegrationID), "self-managed")
+		v2.Refused(t, http.MethodPost, "/api/v2/inventories", map[string]any{"type": "hetzner", "name": harness.Unique("qa-inv")}, harness.CodeInvalidArgument)
+		v2.Refused(t, http.MethodPost, "/api/v2/inventories", map[string]any{"name": harness.Unique("qa-inv")}, harness.CodeInvalidArgument)
+	})
 }
