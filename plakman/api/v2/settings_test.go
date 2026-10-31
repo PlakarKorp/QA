@@ -224,3 +224,83 @@ func TestEnvironmentLifecycle(t *testing.T) {
 	require.Empty(t, harness.List[taxon](t, v2, "/api/v2/environments?search="+name).Items)
 	v2.Refused(t, http.MethodDelete, "/api/v2/environments/"+created.ID, nil, harness.CodeNotFound)
 }
+
+// TestSettingsExtras: the sections an organization may hold, how one is
+// handed down the subtree, and the deployment's own configuration beside
+// it; v2 writes one section per request, and reads the taxonomy by search.
+func TestSettingsExtras(t *testing.T) {
+	requireInstance(t)
+	child := createOrg(t, v2, harness.Unique("qa-org"), "")
+	in := scoped(t, v2, child.ID)
+
+	sections := harness.List[struct {
+		Name  string `json:"name"`
+		Scope string `json:"scope"`
+	}](t, in, "/api/v2/setting-sections?limit=200")
+	var organization, deployment []string
+	for _, s := range sections.Items {
+		if s.Scope == "organization" {
+			organization = append(organization, s.Name)
+		} else {
+			deployment = append(deployment, s.Name)
+		}
+	}
+	require.Contains(t, organization, "retention")
+	require.Contains(t, deployment, "packages")
+	require.Contains(t, deployment, "logs")
+
+	var own setting
+	in.OK(t, http.MethodPatch, "/api/v2/settings/retention", map[string]any{"min_versions": 3}, &own)
+	require.EqualValues(t, 3, settingConfig(t, own)["min_versions"])
+	t.Run("deployment section from a sub-organization", func(t *testing.T) {
+		// v1 refuses it; v2 writes the deployment's package feed, so the
+		// write here keeps it at its default rather than send every install
+		// after it elsewhere.
+		finding(t, "PATCH /settings/packages from a sub-organization is accepted and lands on the deployment's package feed")
+		in.Refused(t, http.MethodPatch, "/api/v2/settings/packages", map[string]any{"repository_url": ""}, harness.CodePermissionDenied)
+	})
+
+	t.Run("flags", func(t *testing.T) {
+		status, raw := in.Do(t, http.MethodPatch, "/api/v2/settings/retention/flags", map[string]any{"inheritable": true})
+		require.Equal(t, http.StatusNoContent, status, "%s", raw)
+		var flagged struct {
+			Inheritable bool `json:"inheritable"`
+			Locked      bool `json:"locked"`
+		}
+		in.OK(t, http.MethodGet, "/api/v2/settings/retention", nil, &flagged)
+		require.True(t, flagged.Inheritable)
+		require.False(t, flagged.Locked)
+		in.Refused(t, http.MethodPatch, "/api/v2/settings/frobnication/flags", map[string]any{"locked": true}, harness.CodeInvalidArgument)
+		in.Refused(t, http.MethodPatch, "/api/v2/settings/mailer/flags", map[string]any{"inheritable": true}, harness.CodeNotFound)
+	})
+	t.Run("deployment", func(t *testing.T) {
+		// The log retention is the one deployment section a write leaves no
+		// mark on: the packages feed would redirect every install after it.
+		var logs setting
+		v2.OK(t, http.MethodPatch, "/api/v2/settings/logs", map[string]any{"retention_days": 30}, &logs)
+		require.Equal(t, "deployment", logs.Scope)
+		require.EqualValues(t, 30, settingConfig(t, logs)["retention_days"])
+		finding(t, "a deployment section written with PATCH /settings/{name} is then not_found to GET /settings/{name} and absent from GET /settings")
+		v2.OK(t, http.MethodGet, "/api/v2/settings/logs", nil, &logs)
+		require.EqualValues(t, 30, settingConfig(t, logs)["retention_days"])
+		var names []string
+		for _, s := range harness.List[setting](t, v2, "/api/v2/settings?limit=200").Items {
+			if s.Scope == "deployment" {
+				names = append(names, s.Name)
+			}
+		}
+		require.Contains(t, names, "logs")
+	})
+	t.Run("search", func(t *testing.T) {
+		classes := harness.List[taxon](t, v2, "/api/v2/data-classes?search=business")
+		var names []string
+		for _, c := range classes.Items {
+			names = append(names, c.Class)
+		}
+		require.Contains(t, names, "business_data")
+		envs := harness.List[taxon](t, v2, "/api/v2/environments?search=produc")
+		require.Len(t, envs.Items, 1)
+		require.Equal(t, "production", envs.Items[0].Environment)
+		require.Empty(t, harness.List[taxon](t, v2, "/api/v2/environments?search="+harness.Unique("no-such-env")).Items)
+	})
+}

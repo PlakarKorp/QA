@@ -23,7 +23,7 @@ func TestSettingSections(t *testing.T) {
 			Scope string `json:"scope"`
 		} `json:"sections"`
 	}
-	pcpctl.JSON(t, &sections, "setting", "sections")
+	pcpctl.JSON(t, &sections, "setting", "sections", "--deployment")
 	require.Equal(t, "deployment", sections.Scope)
 	var names []string
 	for _, s := range sections.Sections {
@@ -108,6 +108,9 @@ func TestQuota(t *testing.T) {
 	requireInstance(t)
 	child := createOrg(t, pcpctl, harness.Unique("qa-org"))
 	in := pcpctl.In(child.ID)
+	if in.NotOnV2(t, "quota", "get") {
+		return
+	}
 
 	var quota struct {
 		OrganizationID string `json:"organization_id"`
@@ -230,4 +233,99 @@ func count(items []string, want string) int {
 		}
 	}
 	return n
+}
+
+// TestSettingsExtras: the sections an organization may hold, several of
+// them written at once, how one is handed down the subtree, and the
+// deployment's own configuration beside it.
+func TestSettingsExtras(t *testing.T) {
+	requireInstance(t)
+	child := createOrg(t, pcpctl, harness.Unique("qa-org"))
+	in := pcpctl.In(child.ID)
+
+	var sections struct {
+		Scope    string `json:"scope"`
+		Sections []struct {
+			Name  string `json:"name"`
+			Scope string `json:"scope"`
+		} `json:"sections"`
+	}
+	in.JSON(t, &sections, "setting", "sections")
+	require.Equal(t, "organization", sections.Scope)
+	var names []string
+	for _, s := range sections.Sections {
+		names = append(names, s.Name)
+	}
+	require.Contains(t, names, "retention")
+	require.NotContains(t, names, "packages", "the deployment's sections are not the organization's")
+
+	type stored map[string]map[string]any
+	var written stored
+	in.JSON(t, &written, "setting", "update", `{"retention":{"min_versions":3}}`)
+	require.EqualValues(t, 3, written["retention"]["min_versions"])
+	var own stored
+	in.JSON(t, &own, "setting", "get", "retention")
+	require.EqualValues(t, 3, own["retention"]["min_versions"])
+	in.Fails(t, harness.ExitError, "setting", "update", "{nope")
+	if !harness.OnV2() {
+		// v2 accepts this and writes the deployment's package feed
+		// (api/README.md); not run there, as every install after it would
+		// go to that URL.
+		in.Fails(t, harness.ExitError, "setting", "update", `{"packages":{"repository_url":"http://x"}}`)
+	}
+
+	t.Run("flags", func(t *testing.T) {
+		in.JSON(t, &own, "setting", "flags", "retention", "--inheritable")
+		require.EqualValues(t, 3, own["retention"]["min_versions"], "the flags answer the section as it stands")
+		in.OK(t, "setting", "flags", "retention")
+		in.Fails(t, harness.ExitError, "setting", "flags", "frobnication", "--locked")
+		if !harness.OnV2() {
+			// Only a section the organization holds can be handed down.
+			in.Fails(t, harness.ExitNotFound, "setting", "flags", "mailer", "--inheritable")
+		}
+	})
+	t.Run("deployment", func(t *testing.T) {
+		pcpctl.JSON(t, &sections, "setting", "sections", "--deployment")
+		require.Equal(t, "deployment", sections.Scope)
+		var names []string
+		for _, s := range sections.Sections {
+			names = append(names, s.Name)
+			require.Equal(t, "deployment", s.Scope)
+		}
+		require.Contains(t, names, "packages")
+		require.Contains(t, names, "logs")
+
+		// The log retention is the one deployment section a write leaves no
+		// mark on: the packages feed would redirect every install after it.
+		var all stored
+		pcpctl.JSON(t, &all, "setting", "list", "--deployment")
+		pcpctl.OK(t, "setting", "set", "--deployment", "logs", `{"retention_days":30}`)
+		if harness.OnV2() {
+			// v2 takes the write and then cannot show it: api/README.md.
+			pcpctl.Fails(t, harness.ExitNotFound, "setting", "get", "--deployment", "logs")
+			return
+		}
+		var logs stored
+		pcpctl.JSON(t, &logs, "setting", "get", "--deployment", "logs")
+		require.EqualValues(t, 30, logs["logs"]["retention_days"])
+		pcpctl.JSON(t, &written, "setting", "update", "--deployment", `{"logs":{"retention_days":31}}`)
+		require.EqualValues(t, 31, written["logs"]["retention_days"])
+		pcpctl.JSON(t, &all, "setting", "list", "--deployment")
+		require.Contains(t, all, "logs")
+
+		pcpctl.Fails(t, harness.ExitError, "setting", "set", "--deployment", "retention", `{"min_versions":1}`)
+		pcpctl.Fails(t, harness.ExitError, "setting", "update", "--deployment", `{"retention":{"min_versions":1}}`)
+		pcpctl.Fails(t, harness.ExitError, "setting", "get", "--deployment", "retention", "--effective")
+	})
+	t.Run("search", func(t *testing.T) {
+		var classes []string
+		pcpctl.JSON(t, &classes, "catalogue", "data-classes", "search", "business")
+		require.Contains(t, classes, "business_data")
+		var envs []string
+		pcpctl.JSON(t, &envs, "catalogue", "environments", "search", "produc")
+		require.Equal(t, []string{"production"}, envs)
+		pcpctl.JSON(t, &envs, "catalogue", "environments", "search", harness.Unique("no-such-env"))
+		require.Empty(t, envs)
+		pcpctl.Fails(t, harness.ExitUsage, "catalogue", "environments", "search")
+	})
 }
