@@ -3,11 +3,14 @@
 #
 #   jobs:
 #     qa:
+#       permissions: { contents: read, id-token: write }
 #       uses: PlakarKorp/QA/.github/workflows/integration.yml@<ref>
 #       with: { dir: s3, qa-version-file: s3/.qa-version }
 #
 # The QA version pins the lint rules and tool versions in integrations/, apart
 # from `uses:`: bumping it can break the build, so do it on purpose.
+#
+# `id-token: write` lets the test job upload its coverage to kortex.
 name: integration
 
 on:
@@ -137,4 +140,13 @@ jobs:
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
       - name: test
-        run: go test -race ./...
+        run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+
+      # Uploads only when the caller grants `id-token: write`; otherwise the
+      # upload warns. Asking for it here would fail every caller that does not.
+      - name: coverage
+        if: ${{ !cancelled() }}
+        uses: PlakarKorp/QA/.github/actions/coverage@26877c5778b3486ddc561396c0ee92a4370621d0 # v1.0.0
+        with:
+          profile: ${{ inputs.dir }}/coverage.out
+          flag: ${{ inputs.dir }}
