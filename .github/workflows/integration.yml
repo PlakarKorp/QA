@@ -140,5 +140,7 @@ jobs:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
 
+      # Tests that need containers or live services skip themselves under
+      # -short and run locally with `make test`.
       - name: test
-        run: go test -race ./...
+        run: go test -short -race ./...
