@@ -8,6 +8,14 @@
 #
 # The QA version pins the lint rules and tool versions in integrations/, apart
 # from `uses:`: bumping it can break the build, so do it on purpose.
+#
+# An integration that depends on private Go modules names them in go-private.
+# The job token can only read the calling repository; for modules elsewhere,
+# pass a token that can read them:
+#
+#       with: { dir: msad, qa-version-file: msad/.qa-version,
+#               go-private: github.com/PlakarKorp/integrations-private }
+#       secrets: { go-private-token: ${{ secrets.PRIVATE_MODULES_TOKEN }} }
 name: integration
 
 on:
@@ -21,6 +29,14 @@ on:
         description: file holding the version of PlakarKorp/QA to take the lint rules and tools from, relative to the repository root; main if unset
         type: string
         default: ''
+      go-private:
+        description: GOPRIVATE patterns of the private Go modules the integration depends on; none if unset
+        type: string
+        default: ''
+    secrets:
+      go-private-token:
+        description: token that can read the go-private modules; the job token if unset, which only reads the calling repository
+        required: false
 
 jobs:
   versions:
@@ -117,6 +133,16 @@ jobs:
           sparse-checkout: integrations/golangci.yml
           sparse-checkout-cone-mode: false
 
+      # After the checkouts: the rewrite applies to every github.com URL.
+      - name: set up private modules
+        if: inputs.go-private != ''
+        env:
+          GO_PRIVATE: ${{ inputs.go-private }}
+          TOKEN: ${{ secrets.go-private-token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=$GO_PRIVATE" >> "$GITHUB_ENV"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -139,6 +165,15 @@ jobs:
         with:
           go-version-file: ${{ inputs.dir }}/go.mod
           cache-dependency-path: ${{ inputs.dir }}/go.sum
+
+      - name: set up private modules
+        if: inputs.go-private != ''
+        env:
+          GO_PRIVATE: ${{ inputs.go-private }}
+          TOKEN: ${{ secrets.go-private-token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=$GO_PRIVATE" >> "$GITHUB_ENV"
 
       - name: test
         run: go test -race ./...
