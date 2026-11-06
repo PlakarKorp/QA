@@ -229,18 +229,19 @@ run_suite() { # run_suite <name> <-run regexp> <outfile>
 
 # run_api runs one API scenario package against the standing instance and
 # prints one line per scenario, subtests included, so the summary names the
-# contract that broke rather than the file it lives in.
-run_api() { # run_api <v1|v2> <outfile>
+# contract that broke rather than the file it lives in. The label is what
+# the summary calls the phase; the api is the wire pcpctl speaks in it.
+run_api() { # run_api <package> <label> <pcpctl api> <outfile>
   ( cd "$QA_ROOT" && \
     PLAKMAN_URL="$PLAKMAN_URL" PLAKMAN_PARENT="$PARENT_URL" \
-    PCPCTL_BIN="$QA_ROOT/bin/pcpctl" \
-    go test "./api/$1/..." -count=1 -v -timeout 20m ) > "$2" 2>&1
+    PCPCTL_BIN="$QA_ROOT/bin/pcpctl" PCPCTL_API="$3" \
+    go test "./api/$1/..." -count=1 -v -timeout 20m ) > "$4" 2>&1
   local rc=$?
-  grep -E '^\s*--- (PASS|FAIL|SKIP)' "$2" | sed -E 's/^ *//; s/^--- //; s/ \(.*\)$//' \
-    | awk -v v="$1" '{printf "    %-5s %s/%s\n", $1, v, $2}'
-  if [ "$rc" -ne 0 ] && ! grep -qE '^\s*--- FAIL' "$2"; then
+  grep -E '^\s*--- (PASS|FAIL|SKIP)' "$4" | sed -E 's/^ *//; s/^--- //; s/ \(.*\)$//' \
+    | awk -v v="$2" '{printf "    %-5s %s/%s\n", $1, v, $2}'
+  if [ "$rc" -ne 0 ] && ! grep -qE '^\s*--- FAIL' "$4"; then
     # Nothing ran: a build failure or a harness that could not connect.
-    sed 's/^/    /' "$2" | tail -20
+    sed 's/^/    /' "$4" | tail -20
   fi
   return $rc
 }
@@ -288,11 +289,18 @@ main() {
   # v1 feature it mirrors, so a red line here is either a broken contract or
   # a parity gap. See api/README.md.
   log "api v1 scenarios (pcpctl)"
-  run_api v1 "$LOGS/api-v1.out"
+  run_api v1 v1 v1 "$LOGS/api-v1.out"
   p4=$?
   log "api v2 scenarios (parity)"
-  run_api v2 "$LOGS/api-v2.out"
+  run_api v2 v2 v2 "$LOGS/api-v2.out"
   p5=$?
+  # The v1 scenarios once more, with pcpctl speaking v2: the same commands,
+  # the same exit codes, over pcpctl's v2 wire. A feature v2 has no route
+  # for is asserted as pcpctl's own refusal, so a red line here is the wire
+  # disagreeing with v1, not a parity gap.
+  log "api v1 scenarios (pcpctl on v2)"
+  run_api v1 pcpctl-v2 v2 "$LOGS/api-pcpctl-v2.out"
+  p6=$?
 
   log "plakman suite"
   run_suite suite "$SUITE" "$LOGS/suite.out" 'TestBootstrap$'
@@ -327,7 +335,7 @@ main() {
     [ -n "${QA_OWNS_AGENT:-}" ] && kill "$QA_OWNS_AGENT" 2>/dev/null
   fi
 
-  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ] && [ "$p4" -eq 0 ] && [ "$p5" -eq 0 ]
+  [ "$p1" -eq 0 ] && [ "$p2" -eq 0 ] && [ "$p3" -eq 0 ] && [ "$p4" -eq 0 ] && [ "$p5" -eq 0 ] && [ "$p6" -eq 0 ]
 }
 
 main "$@"

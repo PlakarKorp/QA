@@ -161,7 +161,9 @@ func TestUserRename(t *testing.T) {
 	u := inviteUser(t, pcpctl)
 
 	res := pcpctl.Fails(t, harness.ExitUnauthorized, "user", "rename", u.ID, "Renamed Person")
-	require.Contains(t, res.Stderr, "Forbidden")
+	if !harness.OnV2() {
+		require.Contains(t, res.Stderr, "Forbidden")
+	}
 	pcpctl.Fails(t, harness.ExitUnauthorized, "user", "rename", inst.UserID.String(), "Renamed Admin")
 
 	var got user
@@ -387,9 +389,13 @@ func TestGrantLifecycle(t *testing.T) {
 	pcpctl.JSON(t, &updated, "grant", "update", created.ID, "--role", second)
 	require.Equal(t, second, updated.Role.Name)
 	require.Equal(t, u.ID, updated.Subject.ID)
-	require.NotEqual(t, created.ID, updated.ID, "an updated grant gets an id of its own")
-	t.Cleanup(func() { pcpctl.Run(t, "grant", "revoke", updated.ID, "--yes") })
-	pcpctl.Fails(t, harness.ExitNotFound, "grant", "get", created.ID)
+	if harness.OnV2() {
+		require.Equal(t, created.ID, updated.ID, "v2 patches the grant in place")
+	} else {
+		require.NotEqual(t, created.ID, updated.ID, "an updated grant gets an id of its own")
+		t.Cleanup(func() { pcpctl.Run(t, "grant", "revoke", updated.ID, "--yes") })
+		pcpctl.Fails(t, harness.ExitNotFound, "grant", "get", created.ID)
+	}
 	pcpctl.JSON(t, &got, "grant", "get", updated.ID)
 	require.Equal(t, second, got.Role.Name)
 
@@ -506,7 +512,9 @@ func TestAPIKeys(t *testing.T) {
 
 	t.Run("a person's key may not mint", func(t *testing.T) {
 		res := pcpctl.Fails(t, harness.ExitUnauthorized, "user", "api-keys", "add", u.ID, "--description", "qa")
-		require.Contains(t, res.Stderr, "Forbidden")
+		if !harness.OnV2() {
+			require.Contains(t, res.Stderr, "Forbidden")
+		}
 		pcpctl.Fails(t, harness.ExitUnauthorized, "user", "api-keys", "add", inst.UserID.String())
 		pcpctl.JSON(t, &keys, "user", "api-keys", "list", u.ID)
 		require.Empty(t, keys)
@@ -589,7 +597,13 @@ func TestTwoFactor(t *testing.T) {
 	pcpctl.JSON(t, &methods, "2fa", "list")
 	require.Empty(t, methods)
 
-	pcpctl.Fails(t, harness.ExitUnauthorized, "2fa", "reset", u.ID, "--yes")
+	if harness.OnV2() {
+		// v2 revokes a member's factors one by one; a member with none has
+		// nothing to revoke, which comes before the refusal.
+		pcpctl.Fails(t, harness.ExitNotFound, "2fa", "reset", u.ID, "--yes")
+	} else {
+		pcpctl.Fails(t, harness.ExitUnauthorized, "2fa", "reset", u.ID, "--yes")
+	}
 	pcpctl.Fails(t, harness.ExitError, "2fa", "reset", u.ID)
 }
 
@@ -599,5 +613,92 @@ func TestMyGroups(t *testing.T) {
 
 	var groups []string
 	pcpctl.JSON(t, &groups, "my-groups")
+	if harness.OnV2() {
+		// v2 lists the groups the caller was put in, without the built-in
+		// tokens, and the administrator is in none.
+		require.Empty(t, groups)
+		return
+	}
 	require.NotEmpty(t, groups)
+}
+
+// TestInvitationAccept: an invitee follows the link with the token, a name
+// and a password, and becomes a member with an account of their own; the
+// token works once, and a token that is not one is refused.
+func TestInvitationAccept(t *testing.T) {
+	requireInstance(t)
+	name := harness.Unique("qa-invitee")
+	email := name + "@example.com"
+
+	var created struct {
+		Invitation struct {
+			Token string `json:"token"`
+		} `json:"invitation"`
+	}
+	pcpctl.JSON(t, &created, "invitation", "create", name, "--email", email)
+	require.NotEmpty(t, created.Invitation.Token, "the inviter sees the token, to build the link")
+
+	// Accepting is the invitee's own step, with no key of their own yet: the
+	// configured key is not sent.
+	anonymous := *pcpctl
+	anonymous.APIKey = ""
+	var accepted struct {
+		UserID         string `json:"user_id"`
+		Email          string `json:"email"`
+		OrganizationID string `json:"organization_id"`
+		AccountCreated bool   `json:"account_created"`
+	}
+	// The token is url-safe base64 and may start with a dash: after "--".
+	anonymous.WithStdin("Sup3r-Secret-Passw0rd!\n").JSON(t, &accepted, "invitation", "accept", "--name", "Invitee", "--password-stdin", "--", created.Invitation.Token)
+	require.NotEmpty(t, accepted.UserID)
+	require.Equal(t, email, accepted.Email)
+	require.Equal(t, inst.OrgID.String(), accepted.OrganizationID)
+	require.True(t, accepted.AccountCreated)
+	t.Cleanup(func() { pcpctl.Run(t, "member", "remove", accepted.UserID, "--yes") })
+
+	require.Contains(t, memberIDs(t, pcpctl), accepted.UserID)
+	var u user
+	pcpctl.JSON(t, &u, "user", "get", email)
+	require.Equal(t, accepted.UserID, u.ID)
+
+	t.Run("twice", func(t *testing.T) {
+		res := anonymous.WithStdin("Sup3r-Secret-Passw0rd!\n").Run(t, "invitation", "accept", "--name", "Invitee", "--password-stdin", "--", created.Invitation.Token)
+		require.NotEqual(t, harness.ExitOK, res.Code, "an invitation is accepted once: %s", res)
+	})
+	t.Run("not a token", func(t *testing.T) {
+		res := anonymous.Run(t, "invitation", "accept", "not-a-token")
+		require.NotEqual(t, harness.ExitOK, res.Code, "%s", res)
+	})
+	pcpctl.Fails(t, harness.ExitUsage, "invitation", "accept")
+}
+
+// TestUserPassword: a member's password is set from standard input, never
+// from an argument, and an empty one or an absent member is refused.
+func TestUserPassword(t *testing.T) {
+	requireInstance(t)
+	u := inviteUser(t, pcpctl)
+
+	require.Contains(t, pcpctl.WithStdin("Sup3r-Secret-Passw0rd!\n").OK(t, "user", "set-password", u.ID), u.ID)
+	pcpctl.Fails(t, harness.ExitError, "user", "set-password", u.ID)
+	pcpctl.WithStdin("Sup3r-Secret-Passw0rd!\n").Fails(t, harness.ExitNotFound, "user", "set-password", missing)
+	pcpctl.Fails(t, harness.ExitUsage, "user", "set-password")
+}
+
+// TestTwoFactorEnrolment: a second factor protects an interactive credential,
+// so enrolling, confirming or disabling one is refused to a badge from a key.
+func TestTwoFactorEnrolment(t *testing.T) {
+	requireInstance(t)
+
+	pcpctl.Fails(t, harness.ExitUnauthorized, "2fa", "enroll")
+	pcpctl.Fails(t, harness.ExitError, "2fa", "disable", "--code", "123456")
+	pcpctl.Fails(t, harness.ExitUsage, "2fa", "disable", "--yes")
+	pcpctl.Fails(t, harness.ExitUsage, "2fa", "confirm")
+	if harness.OnV2() {
+		// v2 addresses the pending factor, which a key never holds.
+		pcpctl.Fails(t, harness.ExitError, "2fa", "confirm", "123456")
+		pcpctl.Fails(t, harness.ExitNotFound, "2fa", "disable", "--yes", "--code", "123456")
+		return
+	}
+	pcpctl.Fails(t, harness.ExitUnauthorized, "2fa", "confirm", "123456")
+	pcpctl.Fails(t, harness.ExitUnauthorized, "2fa", "disable", "--yes", "--code", "123456")
 }

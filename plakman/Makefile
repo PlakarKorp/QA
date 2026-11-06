@@ -11,7 +11,7 @@ CORE_API_SRC ?= $(SRC_ROOT)/core-api
 PCPCTL_SRC ?= $(SRC_ROOT)/pcpctl
 export PLAKMAN_SRC CORE_API_SRC PCPCTL_SRC
 
-.PHONY: all build qa qa-keep instance scenarios api api-v1 api-v2 bench clean
+.PHONY: all build qa qa-keep instance scenarios api api-v1 api-v2 api-pcpctl-v2 pcpctl bench clean
 
 all: build
 
@@ -36,16 +36,21 @@ scenarios:
 	$(GO) test ./scenarios/... -count=1 -v
 
 # The API contract scenarios, against a standing instance: v1 through pcpctl,
-# then v2 mirroring every v1 scenario. See api/README.md.
-api: api-v1 api-v2
+# then v2 mirroring every v1 scenario, then the v1 scenarios once more with
+# pcpctl speaking v2. See api/README.md.
+api: api-v1 api-v2 api-pcpctl-v2
 
-api-v1: bin/pcpctl
-	PCPCTL_BIN=$(CURDIR)/bin/pcpctl $(GO) test ./api/v1/... -count=1 -v
+api-v1: pcpctl
+	PCPCTL_BIN=$(CURDIR)/bin/pcpctl PCPCTL_API=v1 $(GO) test ./api/v1/... -count=1 -v
 
 api-v2:
 	$(GO) test ./api/v2/... -count=1 -v
 
-bin/pcpctl:
+api-pcpctl-v2: pcpctl
+	PCPCTL_BIN=$(CURDIR)/bin/pcpctl PCPCTL_API=v2 $(GO) test ./api/v1/... -count=1 -v
+
+# Always rebuilt: the checkout beside QA is what the scenarios test.
+pcpctl:
 	cd $(PCPCTL_SRC) && $(GO) build -o $(CURDIR)/bin/pcpctl ./cmd/pcpctl
 
 bench:

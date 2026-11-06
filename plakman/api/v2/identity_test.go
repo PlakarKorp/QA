@@ -616,3 +616,71 @@ func TestMyGroups(t *testing.T) {
 	}
 	require.True(t, found, "the caller's memberships name the group")
 }
+
+// TestInvitationAccept: an invitee follows the link with the token, a name
+// and a password, and becomes a member with an account of their own; the
+// token works once, and a token that is not one is refused.
+func TestInvitationAccept(t *testing.T) {
+	requireInstance(t)
+	name := harness.Unique("qa-invitee")
+	email := name + "@example.com"
+
+	var created struct {
+		Token string `json:"token"`
+	}
+	v2.OK(t, http.MethodPost, "/api/v2/invitations", map[string]string{"email": email}, &created)
+	require.NotEmpty(t, created.Token)
+
+	// Accepting is the invitee's own step, with no badge yet.
+	anonymous := v2.As("")
+	var accepted struct {
+		UserID         string `json:"user_id"`
+		Email          string `json:"email"`
+		OrganizationID string `json:"organization_id"`
+		AccountCreated bool   `json:"account_created"`
+	}
+	anonymous.OK(t, http.MethodPost, "/api/v2/invitations/accept", map[string]string{"token": created.Token, "name": "Invitee", "password": "Sup3r-Secret-Passw0rd!"}, &accepted)
+	require.NotEmpty(t, accepted.UserID)
+	require.Equal(t, email, accepted.Email)
+	require.Equal(t, inst.OrgID.String(), accepted.OrganizationID)
+	require.True(t, accepted.AccountCreated)
+	t.Cleanup(func() {
+		for _, m := range memberships(t, v2, "&user_id="+accepted.UserID) {
+			v2.Do(t, http.MethodDelete, "/api/v2/memberships/"+m.ID, nil)
+		}
+	})
+	require.Contains(t, memberIDs(t, v2, inst.OrgID.String()), accepted.UserID)
+
+	t.Run("twice", func(t *testing.T) {
+		status, _ := anonymous.Do(t, http.MethodPost, "/api/v2/invitations/accept", map[string]string{"token": created.Token, "name": "Invitee", "password": "Sup3r-Secret-Passw0rd!"})
+		require.GreaterOrEqual(t, status, 400, "an invitation is accepted once")
+	})
+	t.Run("not a token", func(t *testing.T) {
+		status, _ := anonymous.Do(t, http.MethodPost, "/api/v2/invitations/accept", map[string]string{"token": "not-a-token"})
+		require.GreaterOrEqual(t, status, 400)
+	})
+	// No token is a token that names nothing.
+	anonymous.Refused(t, http.MethodPost, "/api/v2/invitations/accept", map[string]string{}, harness.CodeNotFound)
+}
+
+// TestUserPassword: a member's password is set by an action on the user; a
+// short one, or an absent member, is refused.
+func TestUserPassword(t *testing.T) {
+	requireInstance(t)
+	u := createUser(t, v2, "")
+
+	v2.OK(t, http.MethodPost, "/api/v2/users/"+u.ID+"/actions/set-password", map[string]string{"password": "Sup3r-Secret-Passw0rd!"}, nil)
+	v2.Refused(t, http.MethodPost, "/api/v2/users/"+u.ID+"/actions/set-password", map[string]string{"password": ""}, harness.CodeInvalidArgument)
+	v2.Refused(t, http.MethodPost, "/api/v2/users/"+missing+"/actions/set-password", map[string]string{"password": "Sup3r-Secret-Passw0rd!"}, harness.CodeNotFound)
+}
+
+// TestTwoFactorEnrolment: a second factor protects an interactive credential,
+// so enrolling, confirming or disabling one is refused to a badge from a key.
+func TestTwoFactorEnrolment(t *testing.T) {
+	requireInstance(t)
+
+	v2.Refused(t, http.MethodPost, "/api/v2/two-factors", map[string]string{"type": "totp"}, harness.CodePermissionDenied)
+	v2.Refused(t, http.MethodPost, "/api/v2/two-factors", map[string]string{"type": "carrier-pigeon"}, harness.CodeInvalidArgument)
+	v2.Refused(t, http.MethodPost, "/api/v2/two-factors/"+missing+"/actions/confirm", map[string]string{"code": "123456"}, harness.CodePermissionDenied)
+	v2.Refused(t, http.MethodPost, "/api/v2/two-factors/"+missing+"/actions/disable", map[string]string{"code": "123456"}, harness.CodePermissionDenied)
+}

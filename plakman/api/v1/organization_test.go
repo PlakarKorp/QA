@@ -54,13 +54,20 @@ func TestOrganizationLifecycle(t *testing.T) {
 	name := harness.Unique("qa-org")
 
 	var created organization
-	pcpctl.JSON(t, &created, "organization", "create", name, "--type", "enterprise", "--info", "team=qa")
+	if harness.OnV2() {
+		// v2 keeps no free-form info on an organization; pcpctl refuses the
+		// flag there rather than drop it.
+		pcpctl.Fails(t, harness.ExitError, "organization", "create", name, "--type", "enterprise", "--info", "team=qa")
+		pcpctl.JSON(t, &created, "organization", "create", name, "--type", "enterprise")
+	} else {
+		pcpctl.JSON(t, &created, "organization", "create", name, "--type", "enterprise", "--info", "team=qa")
+		require.Equal(t, "qa", created.Info["team"])
+	}
 	require.NotEmpty(t, created.ID)
 	require.Equal(t, name, created.Name)
 	require.Equal(t, "enterprise", created.Type)
 	require.NotNil(t, created.ParentID, "a sub-organization names its parent")
 	require.Equal(t, inst.OrgID.String(), *created.ParentID, "it is created under the organization in scope")
-	require.Equal(t, "qa", created.Info["team"])
 
 	var byID organization
 	pcpctl.JSON(t, &byID, "organization", "get", created.ID)
@@ -199,7 +206,11 @@ func TestOrganizationScoping(t *testing.T) {
 
 	t.Run("absent organization", func(t *testing.T) {
 		// Scoping is a badge for that organization, and a badge for one the
-		// key cannot reach is refused as such.
+		// key cannot reach is refused as such; v2 says it is not there.
+		if harness.OnV2() {
+			pcpctl.In(missing).Fails(t, harness.ExitNotFound, "organization", "children")
+			return
+		}
 		pcpctl.In(missing).Fails(t, harness.ExitUnauthorized, "organization", "children")
 	})
 	t.Run("unknown name", func(t *testing.T) {

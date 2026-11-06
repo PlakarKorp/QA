@@ -4,6 +4,7 @@
 package apiv2
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -364,4 +365,492 @@ func TestUsage(t *testing.T) {
 	v2.Refused(t, http.MethodGet, "/api/v2/organizations?parent_id=not-an-id", nil, harness.CodeInvalidArgument)
 	status, _ := v2.Do(t, http.MethodPut, "/api/v2/organizations", nil)
 	require.Contains(t, []int{http.StatusMethodNotAllowed, http.StatusNotFound}, status)
+}
+
+// TestSchedulerLifecycle: the caller makes a scheduler of their own beside
+// the default one, cannot make a second, sees it among the user schedulers,
+// deletes it, and cannot delete what is gone.
+func TestSchedulerLifecycle(t *testing.T) {
+	requireInstance(t)
+	child := createOrg(t, v2, harness.Unique("qa-org"), "")
+	in := scoped(t, v2, child.ID)
+
+	var s struct {
+		ID          string `json:"id"`
+		Actor       string `json:"actor"`
+		OwnerUserID string `json:"owner_user_id"`
+	}
+	in.OK(t, http.MethodPost, "/api/v2/schedulers", map[string]string{"name": "Mine"}, &s)
+	require.NotEmpty(t, s.ID)
+	require.Equal(t, "user", s.Actor)
+	require.Equal(t, inst.UserID.String(), s.OwnerUserID)
+	t.Cleanup(func() { in.Do(t, http.MethodDelete, "/api/v2/schedulers/"+s.ID, nil) })
+
+	t.Run("twice", func(t *testing.T) {
+		finding(t, "POST /schedulers for a caller who already has one answers 500; v1 answers 409")
+		in.Refused(t, http.MethodPost, "/api/v2/schedulers", map[string]string{"name": "Another"}, harness.CodeConflict)
+	})
+	in.Refused(t, http.MethodPost, "/api/v2/schedulers", map[string]string{}, harness.CodeInvalidArgument)
+
+	users := harness.List[scheduler](t, in, "/api/v2/schedulers?actor=user")
+	require.Len(t, users.Items, 1)
+	require.Equal(t, s.ID, users.Items[0].ID)
+	require.Equal(t, "default", defaultScheduler(t, in).Actor, "the default scheduler stays the organization's")
+
+	status, _ := in.Do(t, http.MethodDelete, "/api/v2/schedulers/"+s.ID, nil)
+	require.Equal(t, http.StatusNoContent, status)
+	require.Empty(t, harness.List[scheduler](t, in, "/api/v2/schedulers?actor=user").Items)
+	in.Refused(t, http.MethodDelete, "/api/v2/schedulers/"+s.ID, nil, harness.CodeNotFound)
+}
+
+type schedulerTask struct {
+	ID          string `json:"id"`
+	SchedulerID string `json:"scheduler_id"`
+	Type        string `json:"type"`
+	Origin      string `json:"origin"`
+	Target      string `json:"target"`
+}
+
+func taskIDs(t *testing.T, c *harness.V2, schedulerID string) []string {
+	t.Helper()
+	page := harness.List[schedulerTask](t, c, "/api/v2/scheduler-tasks?limit=200&scheduler_id="+schedulerID)
+	ids := make([]string, len(page.Items))
+	for i, x := range page.Items {
+		ids[i] = x.ID
+	}
+	return ids
+}
+
+// TestTaskLifecycle adds a check task on a store, finds it in the listing,
+// patches it, runs it once, deletes it, and sees it gone; a task with
+// nothing to run on, or of no type, is refused.
+func TestTaskLifecycle(t *testing.T) {
+	requireInstance(t)
+	_, r := storeFixture(t)
+	c := createStore(t, harness.Unique("qa-store"), r, map[string]string{"key": "port", "value": "1"}, map[string]string{"key": "use_tls", "value": "false"})
+	s := defaultScheduler(t, v2)
+
+	var created schedulerTask
+	v2.OK(t, http.MethodPost, "/api/v2/scheduler-tasks", map[string]any{"scheduler_id": s.ID, "type": "check", "origin": c.ID}, &created)
+	require.NotEmpty(t, created.ID)
+	require.Equal(t, "check", created.Type)
+	require.Equal(t, c.ID, created.Origin)
+	t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/scheduler-tasks/"+created.ID, nil) })
+	require.Contains(t, taskIDs(t, v2, s.ID), created.ID)
+
+	var got schedulerTask
+	v2.OK(t, http.MethodGet, "/api/v2/scheduler-tasks/"+created.ID, nil, &got)
+	require.Equal(t, created.ID, got.ID)
+	v2.OK(t, http.MethodPatch, "/api/v2/scheduler-tasks/"+created.ID, map[string]any{"config": map[string]string{}}, &got)
+	require.Equal(t, created.ID, got.ID, "a patch keeps the task's id")
+
+	var run struct {
+		RunID string `json:"run_id"`
+	}
+	v2.OK(t, http.MethodPost, "/api/v2/scheduler-tasks/"+created.ID+"/actions/run", map[string]any{}, &run)
+	require.NotEmpty(t, run.RunID)
+
+	t.Run("refusals", func(t *testing.T) {
+		v2.Refused(t, http.MethodPost, "/api/v2/scheduler-tasks", map[string]any{"scheduler_id": s.ID, "origin": c.ID}, harness.CodeInvalidArgument)
+		// Unlike v1, v2 takes a task with nothing to run on.
+		var bare schedulerTask
+		v2.OK(t, http.MethodPost, "/api/v2/scheduler-tasks", map[string]any{"scheduler_id": s.ID, "type": "check"}, &bare)
+		v2.OK(t, http.MethodDelete, "/api/v2/scheduler-tasks/"+bare.ID, nil, nil)
+		v2.Refused(t, http.MethodPost, "/api/v2/scheduler-tasks", map[string]any{"scheduler_id": s.ID, "type": "check", "origin": missing}, harness.CodeNotFound)
+		v2.Refused(t, http.MethodPatch, "/api/v2/scheduler-tasks/"+missing, map[string]any{"type": "check"}, harness.CodeNotFound)
+	})
+
+	status, _ := v2.Do(t, http.MethodDelete, "/api/v2/scheduler-tasks/"+created.ID, nil)
+	require.Equal(t, http.StatusNoContent, status)
+	require.NotContains(t, taskIDs(t, v2, s.ID), created.ID)
+	v2.Refused(t, http.MethodDelete, "/api/v2/scheduler-tasks/"+created.ID, nil, harness.CodeNotFound)
+}
+
+// TestOneOffRun: v2 runs a task that exists, so a one-off run is a task made
+// for it and run at once; the run is read back by its id.
+func TestOneOffRun(t *testing.T) {
+	requireInstance(t)
+	_, r := storeFixture(t)
+	c := createStore(t, harness.Unique("qa-store"), r, map[string]string{"key": "port", "value": "1"}, map[string]string{"key": "use_tls", "value": "false"})
+	s := defaultScheduler(t, v2)
+
+	var task schedulerTask
+	v2.OK(t, http.MethodPost, "/api/v2/scheduler-tasks", map[string]any{"scheduler_id": s.ID, "type": "check", "origin": c.ID}, &task)
+	t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/scheduler-tasks/"+task.ID, nil) })
+
+	var run struct {
+		RunID string `json:"run_id"`
+	}
+	v2.OK(t, http.MethodPost, "/api/v2/scheduler-tasks/"+task.ID+"/actions/run", map[string]any{}, &run)
+	require.NotEmpty(t, run.RunID)
+
+	var got struct {
+		RunID string `json:"run_id"`
+	}
+	v2.OK(t, http.MethodGet, "/api/v2/runs/"+run.RunID, nil, &got)
+	require.Equal(t, run.RunID, got.RunID)
+
+	v2.Refused(t, http.MethodGet, "/api/v2/runs/"+missing, nil, harness.CodeNotFound)
+	v2.Refused(t, http.MethodPost, "/api/v2/scheduler-tasks/"+missing+"/actions/run", map[string]any{}, harness.CodeNotFound)
+	v2.Refused(t, http.MethodPost, "/api/v2/scheduler-tasks/"+task.ID+"/actions/run", map[string]any{"run_at": "tomorrow"}, harness.CodeInvalidArgument)
+}
+
+type subjectAccess struct {
+	Read    []string `json:"read"`
+	Execute []string `json:"execute"`
+	Write   []string `json:"write"`
+	Own     []string `json:"own"`
+}
+
+// TestSchedulerAccess sets who holds which verb on the scheduler class, as
+// group tokens, and reads it back; v2 has no widening guard, and an empty
+// patch clears nothing while explicit empty lists do.
+func TestSchedulerAccess(t *testing.T) {
+	requireInstance(t)
+	child := createOrg(t, v2, harness.Unique("qa-org"), "")
+	in := scoped(t, v2, child.ID)
+	var g group
+	in.OK(t, http.MethodPost, "/api/v2/groups", map[string]string{"name": harness.Unique("qa-readers")}, &g)
+	t.Cleanup(func() { in.Do(t, http.MethodDelete, "/api/v2/groups/"+g.ID, nil) })
+	token := "group:" + g.ID
+
+	var access subjectAccess
+	in.OK(t, http.MethodGet, "/api/v2/subjects/scheduler/access", nil, &access)
+	require.Empty(t, access.Read)
+
+	in.OK(t, http.MethodPatch, "/api/v2/subjects/scheduler/access", map[string]any{"read": []string{token}, "execute": []string{token}}, &access)
+	require.Equal(t, []string{token}, access.Read)
+	require.Equal(t, []string{token}, access.Execute)
+	in.OK(t, http.MethodGet, "/api/v2/subjects/scheduler/access", nil, &access)
+	require.Equal(t, []string{token}, access.Read)
+
+	in.OK(t, http.MethodPatch, "/api/v2/subjects/scheduler/access", map[string]any{"read": []string{}, "execute": []string{}}, &access)
+	require.Empty(t, access.Read, "an explicit empty list clears the verb")
+
+	subjects := harness.List[struct {
+		Name string `json:"name"`
+	}](t, in, "/api/v2/subjects")
+	var names []string
+	for _, s := range subjects.Items {
+		names = append(names, s.Name)
+	}
+	require.Contains(t, names, "scheduler")
+}
+
+// TestClassAccess does the same for a class of resources: inventories here.
+func TestClassAccess(t *testing.T) {
+	requireInstance(t)
+	child := createOrg(t, v2, harness.Unique("qa-org"), "")
+	in := scoped(t, v2, child.ID)
+	var g group
+	in.OK(t, http.MethodPost, "/api/v2/groups", map[string]string{"name": harness.Unique("qa-readers")}, &g)
+	t.Cleanup(func() { in.Do(t, http.MethodDelete, "/api/v2/groups/"+g.ID, nil) })
+	token := "group:" + g.ID
+
+	var access subjectAccess
+	in.OK(t, http.MethodGet, "/api/v2/subjects/inventory/access", nil, &access)
+	require.Empty(t, access.Read)
+	in.OK(t, http.MethodPatch, "/api/v2/subjects/inventory/access", map[string]any{"read": []string{token}}, &access)
+	require.Equal(t, []string{token}, access.Read)
+	in.OK(t, http.MethodGet, "/api/v2/subjects/inventory/access", nil, &access)
+	require.Equal(t, []string{token}, access.Read)
+	in.OK(t, http.MethodPatch, "/api/v2/subjects/inventory/access", map[string]any{"read": []string{}}, &access)
+	require.Empty(t, access.Read)
+
+	in.Refused(t, http.MethodGet, "/api/v2/subjects/frobnicate/access", nil, harness.CodeInvalidArgument)
+}
+
+// TestSchedulerJournal: v1 exports the scheduler's job journal as CSV; v2
+// has the activity summary, a rollup, and no journal.
+func TestSchedulerJournal(t *testing.T) {
+	requireInstance(t)
+	gap(t, "export the scheduler's job journal (v1 GET /scheduling/scheduler/journal, pcpctl scheduler journal)")
+}
+
+// TestSnapshotsOfSource: a source holds no snapshots on a fresh store, the
+// reads of what is not there are not-founds, and a prune of an empty store
+// previews and runs to nothing. Pruning is an action on the store connector.
+func TestSnapshotsOfSource(t *testing.T) {
+	requireInstance(t)
+	_, r := storeFixture(t)
+	c := createStore(t, harness.Unique("qa-store"), r, map[string]string{"key": "port", "value": "1"}, map[string]string{"key": "use_tls", "value": "false"})
+	var src connector
+	v2.OK(t, http.MethodPost, "/api/v2/connectors", map[string]any{
+		"type": "source", "integration": "s3", "name": harness.Unique("qa-source"), "protocol": "s3",
+		"urn_id": r.URNID, "fields": s3Fields,
+	}, &src)
+	t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/connectors/"+src.ID, nil) })
+
+	require.Empty(t, harness.List[any](t, v2, "/api/v2/snapshots?source_id="+src.ID).Items)
+	require.Empty(t, harness.List[any](t, v2, "/api/v2/snapshots?store_id="+c.ID).Items)
+	v2.Refused(t, http.MethodGet, "/api/v2/snapshots/"+missing, nil, harness.CodeNotFound)
+	v2.Refused(t, http.MethodPost, "/api/v2/snapshots/"+missing+"/actions/place-legal-hold", map[string]any{}, harness.CodeNotFound)
+	v2.Refused(t, http.MethodPost, "/api/v2/snapshots/"+missing+"/actions/release-legal-hold", map[string]any{"store_id": c.ID}, harness.CodeNotFound)
+	// A filter on a source that does not exist is an empty page, not a
+	// refusal: the filter is a value, and no snapshot carries it.
+	require.Empty(t, harness.List[any](t, v2, "/api/v2/snapshots?source_id="+missing).Items)
+
+	t.Run("prune", func(t *testing.T) {
+		var preview struct {
+			WouldDelete []string `json:"would_delete"`
+			WouldKeep   []string `json:"would_keep"`
+		}
+		v2.OK(t, http.MethodPost, "/api/v2/connectors/"+c.ID+"/actions/prune-preview", map[string]any{"config": map[string]string{"per_day": "1"}}, &preview)
+		require.Empty(t, preview.WouldDelete)
+		require.Empty(t, preview.WouldKeep)
+		var run struct {
+			Deleted []string `json:"deleted"`
+		}
+		v2.OK(t, http.MethodPost, "/api/v2/connectors/"+c.ID+"/actions/prune", map[string]any{"config": map[string]string{"per_day": "1"}}, &run)
+		require.Empty(t, run.Deleted)
+		v2.Refused(t, http.MethodPost, "/api/v2/connectors/"+missing+"/actions/prune-preview", map[string]any{"config": map[string]string{}}, harness.CodeNotFound)
+	})
+}
+
+// TestConnectorExtras: v1 reads a connector's capabilities, its secrets and
+// its configuration as form data; v2 has none of those, and the store behind
+// a connector is an action that answers the executor's verdict.
+func TestConnectorExtras(t *testing.T) {
+	requireInstance(t)
+	_, r := storeFixture(t)
+	c := createStore(t, harness.Unique("qa-store"), r, map[string]string{"key": "port", "value": "1"}, map[string]string{"key": "use_tls", "value": "false"})
+
+	t.Run("capabilities", func(t *testing.T) {
+		gap(t, "say what the caller may do to a connector (v1 GET /connectors/{id}/capabilities, pcpctl connector capabilities)")
+	})
+	t.Run("secrets", func(t *testing.T) {
+		gap(t, "reveal a connector's sensitive values (v1 GET /connectors/{id}/secrets, pcpctl connector secrets)")
+	})
+	t.Run("form", func(t *testing.T) {
+		gap(t, "read or write a connector as form data against its schema (v1 the /form routes, pcpctl connector form)")
+	})
+	t.Run("create-store", func(t *testing.T) {
+		var result struct {
+			OK    bool   `json:"ok"`
+			Error string `json:"error"`
+		}
+		v2.OK(t, http.MethodPost, "/api/v2/connectors/"+c.ID+"/actions/create-store", nil, &result)
+		require.False(t, result.OK, "nothing listens where the store would be made")
+		require.NotEmpty(t, result.Error)
+		v2.Refused(t, http.MethodPost, "/api/v2/connectors/"+missing+"/actions/create-store", nil, harness.CodeNotFound)
+	})
+}
+
+// TestBackupAndRestoreViews: v1 answers what protects each resource and what
+// can be restored from where; v2 has the resources and the connectors, not
+// the two views.
+func TestBackupAndRestoreViews(t *testing.T) {
+	requireInstance(t)
+	gap(t, "list resources with the backups of their sources, or with a source holding a snapshot, or a source's restore points (v1 /backups and /restore routes, pcpctl backup and restore)")
+}
+
+// TestIntegrationDetail reads one integration by name and version, by id,
+// and as the current version for a connector type; the form schema and the
+// catalogue are v1's.
+func TestIntegrationDetail(t *testing.T) {
+	requireInstance(t)
+
+	installed := harness.List[integration](t, v2, "/api/v2/integrations?name=s3")
+	require.Len(t, installed.Items, 1)
+	s3 := installed.Items[0]
+
+	byName := harness.List[integration](t, v2, "/api/v2/integrations?name=s3&supports=store")
+	require.Len(t, byName.Items, 1)
+	require.Equal(t, s3.Version, byName.Items[0].Version)
+	require.Empty(t, harness.List[integration](t, v2, "/api/v2/integrations?name=nope").Items)
+
+	var byID integration
+	v2.OK(t, http.MethodGet, "/api/v2/integrations/"+s3.ID, nil, &byID)
+	require.Equal(t, "s3", byID.Name)
+	require.True(t, byID.IsCurrent)
+	require.Contains(t, byID.Supports, "store")
+	v2.Refused(t, http.MethodGet, "/api/v2/integrations/"+missing, nil, harness.CodeNotFound)
+
+	var current integration
+	v2.OK(t, http.MethodGet, "/api/v2/integrations/resolve?name=s3&supports=store", nil, &current)
+	require.Equal(t, s3.ID, current.ID, "s3 is current for a store")
+	v2.Refused(t, http.MethodGet, "/api/v2/integrations/resolve?name=nope&supports=store", nil, harness.CodeNotFound)
+
+	t.Run("protocols", func(t *testing.T) {
+		gap(t, "read the form schema of an integration, or its protocols for a connector type (v1 GET /integrations/schema/{id}, /integrations/{id}?type=; pcpctl integration schema/describe)")
+	})
+	t.Run("install and make current", func(t *testing.T) {
+		gap(t, "install a version from the catalogue and make it current (v1 POST /integrations/installed/current, pcpctl integration install --current)")
+	})
+}
+
+// TestSecretProviderCreate: a vault is an instance of a secret-provider
+// integration, and the rig installs none, so every creation is refused; the
+// reads of one that does not exist are not-founds.
+func TestSecretProviderCreate(t *testing.T) {
+	requireInstance(t)
+	name := harness.Unique("qa-vault")
+
+	v2.Refused(t, http.MethodPost, "/api/v2/secret-providers", map[string]any{"type": "nope", "name": name, "protocol": "x"}, harness.CodeInvalidArgument)
+	v2.Refused(t, http.MethodPost, "/api/v2/secret-providers", map[string]any{"name": name}, harness.CodeInvalidArgument)
+	require.Empty(t, harness.List[any](t, v2, "/api/v2/secret-providers?search="+name).Items)
+
+	t.Run("not a secret provider", func(t *testing.T) {
+		// s3 is installed and is no secret provider: the type does not
+		// resolve to one.
+		v2.Refused(t, http.MethodPost, "/api/v2/secret-providers", map[string]any{"type": "s3", "name": name, "protocol": "s3"}, harness.CodeInvalidArgument)
+	})
+	t.Run("absent", func(t *testing.T) {
+		gap(t, "read a vault's capabilities, secrets or form (v1 /secret_providers/{id}/capabilities, /secrets, /form; pcpctl secret-provider capabilities/secrets/form)")
+	})
+}
+
+// TestSLATemplates creates a template with a temporality pinned to a store,
+// patches it, binds it to a source, reads the contract back, unbinds it,
+// deletes the template, and sees it gone.
+func TestSLATemplates(t *testing.T) {
+	requireInstance(t)
+	_, r := storeFixture(t)
+	c := createStore(t, harness.Unique("qa-store"), r, map[string]string{"key": "port", "value": "1"}, map[string]string{"key": "use_tls", "value": "false"})
+	var src connector
+	v2.OK(t, http.MethodPost, "/api/v2/connectors", map[string]any{
+		"type": "source", "integration": "s3", "name": harness.Unique("qa-source"), "protocol": "s3",
+		"urn_id": r.URNID, "fields": s3Fields,
+	}, &src)
+	t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/connectors/"+src.ID, nil) })
+
+	envs := harness.List[taxon](t, v2, "/api/v2/environments?search=production")
+	require.Len(t, envs.Items, 1)
+
+	type template struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Status      string   `json:"status"`
+		Environment string   `json:"environment"`
+		Tags        []string `json:"tags"`
+		Revision    int      `json:"revision"`
+	}
+	name := harness.Unique("qa-sla")
+	var created template
+	v2.OK(t, http.MethodPost, "/api/v2/sla-templates", map[string]any{
+		"name": name, "environment_id": envs.Items[0].ID,
+		"temporalities": map[string]any{"day": map[string]any{"frequency": 1, "retention": 7, "store_id": c.ID}},
+	}, &created)
+	require.NotEmpty(t, created.ID)
+	require.Equal(t, name, created.Name)
+	require.NotEmpty(t, created.Status)
+	t.Cleanup(func() { v2.Do(t, http.MethodDelete, "/api/v2/sla-templates/"+created.ID, nil) })
+
+	var got template
+	v2.OK(t, http.MethodGet, "/api/v2/sla-templates/"+created.ID, nil, &got)
+	require.Equal(t, "production", got.Environment, "the read names the environment")
+	require.Contains(t, idsOf(t, harness.List[template](t, v2, "/api/v2/sla-templates?limit=200").Items), created.ID)
+
+	v2.OK(t, http.MethodPatch, "/api/v2/sla-templates/"+created.ID, map[string]any{"tags": []string{"qa"}}, &got)
+	require.Equal(t, []string{"qa"}, got.Tags)
+	require.Greater(t, got.Revision, created.Revision, "a change is a new revision")
+
+	type contract struct {
+		ID         string `json:"id"`
+		TemplateID string `json:"template_id"`
+		SourceID   string `json:"source_id"`
+	}
+	var ct contract
+	v2.OK(t, http.MethodPost, "/api/v2/sla-contracts", map[string]string{"template_id": created.ID, "source_id": src.ID}, &ct)
+	require.Equal(t, created.ID, ct.TemplateID)
+	require.Equal(t, src.ID, ct.SourceID)
+	var read contract
+	v2.OK(t, http.MethodGet, "/api/v2/sla-contracts/"+ct.ID, nil, &read)
+	require.Equal(t, ct, read)
+	require.Contains(t, idsOf(t, harness.List[contract](t, v2, "/api/v2/sla-contracts?limit=200&template_id="+created.ID).Items), ct.ID)
+
+	t.Run("service levels", func(t *testing.T) {
+		gap(t, "list the service levels and how well they are met (v1 GET /account/organizations/{id}/slas, pcpctl sla list)")
+	})
+
+	v2.OK(t, http.MethodDelete, "/api/v2/sla-contracts/"+ct.ID, nil, nil)
+	v2.Refused(t, http.MethodGet, "/api/v2/sla-contracts/"+ct.ID, nil, harness.CodeNotFound)
+	v2.OK(t, http.MethodDelete, "/api/v2/sla-templates/"+created.ID, nil, nil)
+	v2.Refused(t, http.MethodGet, "/api/v2/sla-templates/"+created.ID, nil, harness.CodeNotFound)
+
+	t.Run("refusals", func(t *testing.T) {
+		v2.Refused(t, http.MethodPost, "/api/v2/sla-templates", map[string]any{}, harness.CodeInvalidArgument)
+		v2.Refused(t, http.MethodPost, "/api/v2/sla-contracts", map[string]any{"template_id": missing, "source_id": src.ID}, harness.CodeInvalidArgument)
+	})
+}
+
+// idsOf collects the ids of a listing's rows, whatever their type, through
+// their JSON.
+func idsOf[T any](t *testing.T, rows []T) []string {
+	t.Helper()
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		raw, err := json.Marshal(row)
+		require.NoError(t, err)
+		var withID struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &withID))
+		ids = append(ids, withID.ID)
+	}
+	return ids
+}
+
+// TestDeploymentExtras: the deployment describes itself, dumps its database,
+// lists the webhook events, and enters and leaves safe mode; the debug log,
+// the appliance and the network are v1's.
+func TestDeploymentExtras(t *testing.T) {
+	requireInstance(t)
+
+	var system struct {
+		Version  string `json:"version"`
+		Enrolled bool   `json:"enrolled"`
+	}
+	v2.OK(t, http.MethodGet, "/api/v2/system", nil, &system)
+	require.NotEmpty(t, system.Version)
+	require.True(t, system.Enrolled)
+
+	events := harness.List[struct {
+		Domain string   `json:"domain"`
+		Types  []string `json:"types"`
+	}](t, v2, "/api/v2/webhook-events?limit=200")
+	require.NotEmpty(t, events.Items)
+
+	t.Run("database dump", func(t *testing.T) {
+		status, dump := v2.Do(t, http.MethodGet, "/api/v2/system/database-dump", nil)
+		require.Equal(t, http.StatusOK, status)
+		finding(t, "GET /system/database-dump answers 200 with an empty body in the rig, as v1 does: the daemon runs where no pg_dump is")
+		require.Contains(t, string(dump), "CREATE TABLE")
+	})
+
+	t.Run("safe mode", func(t *testing.T) {
+		var state struct {
+			Enabled bool `json:"enabled"`
+		}
+		v2.OK(t, http.MethodPost, "/api/v2/system/actions/enter-safe-mode", map[string]string{"reason": "qa"}, &state)
+		t.Cleanup(func() { v2.Do(t, http.MethodPost, "/api/v2/system/actions/exit-safe-mode", nil) })
+		require.True(t, state.Enabled)
+		var info struct {
+			SafeMode bool `json:"safe_mode"`
+		}
+		v2.OK(t, http.MethodGet, "/api/v2/system", nil, &info)
+		require.True(t, info.SafeMode)
+		v2.OK(t, http.MethodPost, "/api/v2/system/actions/exit-safe-mode", nil, &state)
+		require.False(t, state.Enabled)
+	})
+	t.Run("debug log", func(t *testing.T) {
+		gap(t, "switch the deployment's debug logging on for a window (v1 PUT /debuglog, pcpctl deployment debug-log --enable)")
+	})
+	t.Run("update", func(t *testing.T) {
+		v2.Refused(t, http.MethodPost, "/api/v2/system/actions/update", map[string]any{"next_version": "v0.0.0"}, harness.CodeInvalidArgument)
+	})
+	t.Run("logs", func(t *testing.T) {
+		v2.Refused(t, http.MethodGet, "/api/v2/system/logs?date=yesterday", nil, harness.CodeInvalidArgument)
+		// The rig's daemon writes no log file of its own.
+		finding(t, "GET /system/logs answers 500 when there is no log file for the day; v1 answers 404")
+		v2.Refused(t, http.MethodGet, "/api/v2/system/logs", nil, harness.CodeNotFound)
+	})
+	t.Run("appliance", func(t *testing.T) {
+		gap(t, "read the appliance's hardware or configure a network interface (v1 GET /appliance/specs, POST /network/interfaces; pcpctl deployment specs, interfaces configure)")
+	})
+	t.Run("packages", func(t *testing.T) {
+		// A package is uploaded as a multipart form; a body that is not one
+		// is refused.
+		v2.Refused(t, http.MethodPost, "/api/v2/integrations", map[string]any{"package": "not-a-file"}, harness.CodeInvalidArgument)
+	})
 }
