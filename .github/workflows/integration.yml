@@ -46,6 +46,7 @@ jobs:
       qa: ${{ steps.qa.outputs.version }}
       golangci-lint: ${{ steps.tools.outputs.golangci-lint }}
       validator: ${{ steps.tools.outputs.validator }}
+      govulncheck: ${{ steps.tools.outputs.govulncheck }}
     steps:
       - name: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,6 +150,40 @@ jobs:
           version: ${{ needs.versions.outputs.golangci-lint }}
           working-directory: ${{ inputs.dir }}
           args: --config ${{ github.workspace }}/.qa/integrations/golangci.yml
+
+  vulncheck:
+    name: vulncheck
+    needs: versions
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.dir }}/go.mod
+          cache-dependency-path: ${{ inputs.dir }}/go.sum
+
+      - name: set up private modules
+        if: inputs.go-private != ''
+        env:
+          GO_PRIVATE: ${{ inputs.go-private }}
+          TOKEN: ${{ secrets.go-private-token || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=$GO_PRIVATE" >> "$GITHUB_ENV"
+
+      # Built with the integration's Go: govulncheck reports the standard
+      # library vulnerabilities of the toolchain it was built with.
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@${{ needs.versions.outputs.govulncheck }}
+
+      - name: govulncheck
+        run: govulncheck ./...
 
   test:
     name: test
