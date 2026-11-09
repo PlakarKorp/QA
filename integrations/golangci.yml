@@ -39,11 +39,16 @@ linters:
     - staticcheck
     - perfsprint
     - errcheck
+    - gosec
   settings:
     exhaustive:
       # A switch with a default case has made its "everything else" choice
       # explicit.
       default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # Importers and exporters read and write user-given paths by design.
+        - G304
 
 issues:
   max-issues-per-linter: 0
