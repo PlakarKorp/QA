@@ -39,6 +39,7 @@ linters:
     - staticcheck
     - perfsprint
     - errcheck
+    - gosec
   settings:
     exhaustive:
       # A switch with a default case has made its "everything else" choice
