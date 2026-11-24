@@ -13,9 +13,15 @@
 # The upload authenticates with the job's OIDC token, so there is no secret,
 # only `id-token: write`. A failed upload is a warning, as the uploader reports
 # it. The threshold needs Go, which the job already set up to run the tests.
+#
+# A module outside the repository root sets working-directory to its
+# directory: the threshold reads the profile with the module's go.mod.
 name: kortex coverage
 description: Send a Go coverage profile to kortex, and fail under a threshold.
 inputs:
+  working-directory:
+    description: directory holding the module's go.mod; profile is relative to it
+    default: .
   profile:
     description: the coverage profile go test wrote
     default: coverage.out
@@ -36,6 +42,7 @@ runs:
     # cannot use an internal repository's action.
     - name: upload coverage to kortex
       shell: bash
+      working-directory: ${{ inputs.working-directory }}
       env:
         PROFILE: ${{ inputs.profile }}
         FLAG: ${{ inputs.flag }}
@@ -54,6 +61,7 @@ runs:
     - name: coverage threshold
       if: ${{ inputs.min-coverage != '' }}
       shell: bash
+      working-directory: ${{ inputs.working-directory }}
       env:
         PROFILE: ${{ inputs.profile }}
         MIN_COVERAGE: ${{ inputs.min-coverage }}
