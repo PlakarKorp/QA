@@ -3,11 +3,14 @@
 #
 #   jobs:
 #     qa:
+#       permissions: { contents: read, id-token: write }
 #       uses: PlakarKorp/QA/.github/workflows/integration.yml@<ref>
 #       with: { dir: s3, qa-version-file: s3/.qa-version }
 #
 # The QA version pins the lint rules and tool versions in integrations/, apart
 # from `uses:`: bumping it can break the build, so do it on purpose.
+#
+# `id-token: write` lets the test job upload its coverage to kortex.
 #
 # An integration that depends on private Go modules names them in go-private.
 # The job token can only read the calling repository; for modules elsewhere,
@@ -176,4 +179,13 @@ jobs:
           echo "GOPRIVATE=$GO_PRIVATE" >> "$GITHUB_ENV"
 
       - name: test
-        run: go test -race ./...
+        run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+
+      # Uploads only when the caller grants `id-token: write`; otherwise the
+      # upload warns. Asking for it here would fail every caller that does not.
+      - name: coverage
+        if: ${{ !cancelled() }}
+        uses: PlakarKorp/QA/.github/actions/coverage@c5c61beaaa33da125ef21282bc07bf52237c2f19 # v1.0.3
+        with:
+          working-directory: ${{ inputs.dir }}
+          flag: ${{ inputs.dir }}
